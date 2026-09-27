@@ -1,0 +1,8 @@
+{
+  "rag_version": "2",
+  "model_name": "all-MiniLM-L6-v2",
+  "embedding_dimension": 384,
+  "normalized": true,
+  "chunk_count": 3376,
+  "index_file": "rag_data_v2\\index.pkl"
+}

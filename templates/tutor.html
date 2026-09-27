@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="ai-lms-version" content="2026-09-22-a-to-z">
+<title>AI-LMS Tutor</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/tutor.css') }}">
+</head>
+<body>
+<div class="app-shell" id="appShell">
+<aside class="sidebar" id="sidebar">
+  <button class="mobile-sidebar-close" id="mobileSidebarClose" type="button" aria-label="Close sidebar">×</button>
+  <div class="sidebar-fixed-top">
+    <div class="brand-row">
+      <div class="brand-mark small">AI</div>
+      <div><div class="brand-title">AI-LMS</div><div class="brand-subtitle">Your AI Learning Companion</div></div>
+    </div>
+    <button class="new-chat-btn" id="newChatBtn"><span class="plus">＋</span><span>New Chat</span></button>
+  </div>
+  <div class="sidebar-scroll" id="sidebarScroll">
+    <button class="new-folder-btn" id="createFolderBtn"><span>📂</span><span>New folder</span></button>
+    <div class="search-box"><span>⌕</span><input id="chatSearch" placeholder="Search chats" autocomplete="off"></div>
+    <div id="sidebarContent"></div>
+  </div>
+  <div class="profile-area" id="profileArea">
+    <div class="profile-main" id="profileMenuBtn">
+      <div class="avatar-wrap"><img id="profileAvatar" class="profile-avatar" src="/api/avatar" onerror="this.style.display='none'"><div class="profile-fallback" id="profileFallback">{{ user.name[:1]|upper }}</div></div>
+      <div class="profile-info"><div class="profile-name">{{ user.name }}</div><div class="profile-role">Student</div></div><span class="profile-chevron"></span>
+    </div>
+    <div class="profile-menu" id="profileMenu"><div class="profile-menu-header"><strong>{{ user.name }}</strong><span>{{ user.email }}</span></div><button id="logoutBtn">↪ Log out</button></div>
+  </div>
+</aside>
+<main class="main-area">
+  <header class="topbar">
+    <div class="topbar-left">
+      <a class="back-btn icon-btn" href="https://mjds.freehosting.dev/" title="Back to website" aria-label="Back to website">←</a>
+      <button id="sidebarToggle" class="icon-btn" title="Hide sidebar" aria-label="Hide sidebar">☰</button>
+    </div>
+    <div class="topbar-title">AI Tutor</div><div class="topbar-actions">
+      <button id="learningModeBtn" class="icon-btn learning-mode-trigger" title="Learning Mode: Off" aria-label="Learning Mode: Off">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 9.2 12 5l8.5 4.2L12 13.4 3.5 9.2Z"></path><path d="M6.2 10.6v4.2c0 1.8 2.6 3.5 5.8 3.5s5.8-1.7 5.8-3.5v-4.2"></path><path d="M20.5 9.5v5"></path></svg>
+      </button>
+      <button id="themeBtn" class="icon-btn" title="Toggle theme">☼</button>
+    </div></header>
+  <section class="chat-scroll" id="chatScroll">
+    <div class="chat-inner">
+      <div class="welcome" id="welcome"><div class="welcome-icon">✦</div><h1>How can I help you learn?</h1><p>Ask questions about your course materials.</p><div class="suggestion-grid"><button class="suggestion">Explain this topic simply</button><button class="suggestion">Give an example</button><button class="suggestion">Create exam questions</button><button class="suggestion">Summarize my material</button></div></div>
+      <div id="messages" class="messages"></div>
+    </div>
+  </section>
+  <button id="jumpLatest" class="jump-latest" title="Jump to latest" aria-label="Jump to latest">ↆ</button>
+  <div class="composer-wrap"><div id="attachmentList" class="attachment-list"></div><form id="composer" class="composer"><input id="fileInput" type="file" multiple hidden><button type="button" id="attachBtn" class="composer-icon" title="Attach file">＋</button><textarea id="questionInput" rows="1" placeholder="Ask anything about your course materials..."></textarea><button type="submit" id="sendBtn" class="send-btn" title="Send"><span class="send-icon">↑</span><span class="stop-icon"></span></button></form></div>
+</main></div>
+
+<div class="chat-menu" id="chatMenu" role="menu"><button id="chatMenuPin">☆ Pin/Unpin chat</button><button id="chatMenuRename">✎ Rename</button><button id="chatMenuDelete" class="danger">🗑️ Delete</button></div>
+
+<div class="modal-backdrop" id="chatActionModal"><div class="modal-card"><div class="modal-icon danger-icon">🗑️</div><h3>Delete chat?</h3><p>This conversation will be permanently removed from your chat history.</p><div id="chatDeleteError" class="modal-error"></div><div class="modal-actions"><button class="modal-secondary" id="chatActionCancel">Cancel</button><button class="modal-danger" id="chatActionConfirm">Delete</button></div></div></div>
+<div class="modal-backdrop" id="renameModal"><div class="modal-card"><h3>Rename chat</h3><p>Give this conversation a short, meaningful name.</p><input id="renameInput" class="modal-input" maxlength="120"><div id="renameError" class="modal-error"></div><div class="modal-actions"><button class="modal-secondary" id="renameCancel">Cancel</button><button class="modal-primary" id="renameSave">Save</button></div></div></div>
+<div class="modal-backdrop" id="folderModal"><div class="modal-card"><h3>Create folder</h3><p>Organize your conversations into folders.</p><input id="folderInput" class="modal-input" maxlength="80" placeholder="Folder name"><div id="folderError" class="modal-error"></div><div class="modal-actions"><button class="modal-secondary" id="folderCancel">Cancel</button><button class="modal-primary" id="folderSave">Create</button></div></div></div>
+<div class="modal-backdrop" id="moveModal"><div class="modal-card"><h3>Move to folder</h3><p>Select the folder for this conversation.</p><div id="folderChoices" class="folder-choices"></div><div class="modal-actions"><button class="modal-secondary" id="moveCancel">Cancel</button></div></div></div>
+<div class="youtube-popover" id="youtubePopover" aria-hidden="true"></div>
+<div class="sources-popover" id="sourcesPopover" aria-hidden="true"></div>
+<div class="sources-popover" id="sourcesPopover" aria-hidden="true"></div>
+<div class="toast" id="toast"></div>
+<script id="ai-lms-user-data" type="application/json">
+{{ user|tojson }}
+</script>
+<script>
+window.AI_LMS_USER = JSON.parse(
+    document.getElementById("ai-lms-user-data").textContent
+);
+</script>
+<script src="{{ url_for('static', filename='js/tutor.js') }}"></script>
+<script src="{{ url_for('static', filename='js/tutor.js') }}"></script>
+</body></html>

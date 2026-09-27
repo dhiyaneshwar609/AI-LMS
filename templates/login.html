@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>AI-LMS Login</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+</head>
+<body class="auth-page">
+    <div class="auth-card">
+        <div class="brand-mark">AI</div>
+        <h1>AI-LMS</h1>
+        <p class="muted">AI-powered personalized learning</p>
+
+        <form id="loginForm">
+            <label>Email</label>
+            <input id="email" type="email" required autocomplete="email">
+
+            <label>Password</label>
+            <input id="password" type="password" required autocomplete="current-password">
+
+            <button class="primary-btn" type="submit">Login</button>
+            <p id="loginError" class="error-text"></p>
+        </form>
+
+        <div class="auth-divider">or</div>
+
+        <form id="registerForm">
+            <h3>Create student account</h3>
+            <input id="registerName" placeholder="Name" required>
+            <input id="registerEmail" type="email" placeholder="Email" required>
+            <input id="registerPassword" type="password" placeholder="Password" required>
+            <button class="secondary-btn" type="submit">Create account</button>
+            <p id="registerMessage" class="muted"></p>
+        </form>
+    </div>
+
+<script>
+const loginForm = document.getElementById("loginForm");
+const registerForm = document.getElementById("registerForm");
+
+loginForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+
+    const res = await fetch("/api/login", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            email: document.getElementById("email").value,
+            password: document.getElementById("password").value
+        })
+    });
+
+    const data = await res.json();
+
+    if (data.ok) {
+        location.href = "/";
+    } else {
+        document.getElementById("loginError").textContent = data.error || "Login failed.";
+    }
+});
+
+registerForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+
+    const res = await fetch("/api/register", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            name: document.getElementById("registerName").value,
+            email: document.getElementById("registerEmail").value,
+            password: document.getElementById("registerPassword").value
+        })
+    });
+
+    const data = await res.json();
+    document.getElementById("registerMessage").textContent =
+        data.ok ? "Account created. You can now login." : (data.error || "Registration failed.");
+});
+</script>
+</body>
+</html>

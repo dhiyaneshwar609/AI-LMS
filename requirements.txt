@@ -1,0 +1,11 @@
+Flask
+PyMuPDF
+Pillow
+pytesseract
+python-docx
+reportlab
+requests
+numpy
+sentence-transformers
+faiss-cpu
+yt-dlp

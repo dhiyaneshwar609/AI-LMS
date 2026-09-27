@@ -1,0 +1,13 @@
+{
+  "rag_version": "2",
+  "filename": "DistrComp_copy.pdf",
+  "extension": ".pdf",
+  "course_id": "1",
+  "material_id": "DistrComp_copy",
+  "source_file": "E:\\AI-LMS\\materials\\DistrComp_copy.pdf",
+  "file_sha256": "384d6d2a2b576a3b861ad686debc37885f9727fefae41fe9297ef3f561bb3855",
+  "page_count": 756,
+  "chunk_count": 1740,
+  "direct_text_pages": 751,
+  "ocr_pages": 5
+}
