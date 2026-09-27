@@ -9,3 +9,5 @@ numpy
 sentence-transformers
 faiss-cpu
 yt-dlp
+
+gunicorn
