@@ -21,3 +21,4 @@ Thumbs.db
 
 rag_data_v2/**/pages/*.png
 avatar_assets/
+.env

@@ -56,11 +56,16 @@ function wireEvents() {
   $('chatMenuPin').addEventListener('click', menuPin);
   $('chatMenuRename').addEventListener('click', menuRename);
   $('chatMenuDelete').addEventListener('click', menuDelete);
+  $('chatMenuMove').addEventListener('click', menuMove);
+  $('folderMenuRename').addEventListener('click', menuRenameFolder);
+  $('folderMenuPin').addEventListener('click', menuPinFolder);
+  $('folderMenuDelete').addEventListener('click', menuDeleteFolder);
   document.addEventListener('click', e => {
     if (!$('profileMenu').contains(e.target) && e.target !== $('profileMenuBtn')) $('profileMenu').classList.remove('open');
     if (!$('chatMenu').contains(e.target) && !e.target.closest('.more-action')) closeChatMenu();
+    if (!$('folderMenu').contains(e.target) && !e.target.closest('.folder-more-action')) closeFolderMenu();
   });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeChatMenu(); closeDeleteModal(); closeRenameModal(); closeFolderModal(); closeMoveModal(); closeYoutubePopover(); } });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeChatMenu(); closeFolderMenu(); closeDeleteModal(); closeRenameModal(); closeFolderModal(); closeMoveModal(); closeYoutubePopover(); } });
   $('renameInput').addEventListener('keydown', e => { if (e.key === 'Enter') saveChatRename(); });
   $('folderInput').addEventListener('keydown', e => { if (e.key === 'Enter') saveFolder(); });
 }
@@ -131,12 +136,17 @@ function folderBlock(folder, chats) {
   const head=document.createElement('div'); head.className='folder-row'; head.dataset.folderId=folder.id;
   const toggle=document.createElement('button'); toggle.className='folder-toggle'; toggle.type='button';
   const expanded=state.expandedFolders[String(folder.id)] !== false;
-  toggle.textContent=expanded?'▾':'▸'; toggle.setAttribute('aria-label',expanded?'Collapse folder':'Expand folder');
-  const icon=document.createElement('span'); icon.className='folder-icon'; icon.textContent='📂';
+  toggle.innerHTML=window.leeLearnIcon(expanded?'chevronDown':'chevronRight'); toggle.setAttribute('aria-label',expanded?'Collapse folder':'Expand folder');
+  const icon=document.createElement('span'); icon.className='folder-icon'; icon.innerHTML=window.leeLearnIcon('folder');
   const name=document.createElement('span'); name.className='folder-name'; name.textContent=folder.name;
-  const count=document.createElement('span'); count.className='folder-count'; count.textContent=String(chats.length);
-  toggle.addEventListener('click',e=>{e.stopPropagation(); state.expandedFolders[String(folder.id)] = !expanded; localStorage.setItem('ai-lms-expanded-folders',JSON.stringify(state.expandedFolders)); renderSidebar();});
-  head.append(toggle,icon,name,count); head.addEventListener('dragover',e=>{e.preventDefault(); head.classList.add('drag-over');}); head.addEventListener('dragleave',()=>head.classList.remove('drag-over')); head.addEventListener('drop',async e=>{e.preventDefault(); head.classList.remove('drag-over'); const id=e.dataTransfer.getData('text/chat-id')||state.draggedChatId; if(id) await moveChat(id,folder.id);});
+  const newChat=document.createElement('button'); newChat.type='button'; newChat.className='folder-header-action folder-new-chat-action';
+  newChat.innerHTML=window.leeLearnIcon('squarePen'); newChat.title='New chat in folder'; newChat.setAttribute('aria-label',`New chat in ${folder.name}`);
+  newChat.addEventListener('click',e=>{e.stopPropagation();createChatInFolder(folder);});
+  const more=document.createElement('button'); more.type='button'; more.className='folder-header-action folder-more-action';
+  more.innerHTML=window.leeLearnIcon('moreHorizontal'); more.title='Folder options'; more.setAttribute('aria-label',`Options for ${folder.name}`);
+  more.addEventListener('click',e=>{e.stopPropagation();openFolderMenu(folder,more);});
+  head.addEventListener('click',()=>{state.expandedFolders[String(folder.id)]=!expanded;localStorage.setItem('ai-lms-expanded-folders',JSON.stringify(state.expandedFolders));renderSidebar();});
+  head.append(toggle,icon,name,newChat,more); head.addEventListener('dragover',e=>{e.preventDefault(); head.classList.add('drag-over');}); head.addEventListener('dragleave',()=>head.classList.remove('drag-over')); head.addEventListener('drop',async e=>{e.preventDefault(); head.classList.remove('drag-over'); const id=e.dataTransfer.getData('text/chat-id')||state.draggedChatId; if(id) await moveChat(id,folder.id);});
   wrap.appendChild(head);
   if(expanded){ const list=document.createElement('div'); list.className='folder-chat-list'; if(chats.length) chats.forEach(c=>list.appendChild(chatRow(c))); else list.appendChild(emptyText('Drop chats here')); wrap.appendChild(list); }
   return wrap;
@@ -171,23 +181,25 @@ function chatRow(chat) {
   const actions=document.createElement('div');
   actions.className='chat-actions';
 
-  // Dedicated Move-to-folder button remains separate from the three-dot menu.
-  const folderBtn=document.createElement('button');
-  folderBtn.type='button';
-  folderBtn.className='chat-action folder-action';
-  folderBtn.textContent='📂';
-  folderBtn.title='Move to folder';
-  folderBtn.setAttribute('aria-label','Move to folder');
-  folderBtn.addEventListener('click',e=>{
-    e.stopPropagation();
-    openMoveModal(chat.id);
-  });
+  if(!chat.folder_id){
+    const folderBtn=document.createElement('button');
+    folderBtn.type='button';
+    folderBtn.className='chat-action folder-action';
+    folderBtn.innerHTML=window.leeLearnIcon('folder');
+    folderBtn.title='Move to folder';
+    folderBtn.setAttribute('aria-label','Move to folder');
+    folderBtn.addEventListener('click',e=>{
+      e.stopPropagation();
+      openMoveModal(chat.id);
+    });
+    actions.appendChild(folderBtn);
+  }
 
-  // No star/pin button in the chat row. Pin remains available inside ⋯.
+  // Pin remains available in chat options instead of adding a row button.
   const more=document.createElement('button');
   more.type='button';
   more.className='chat-action more-action';
-  more.textContent='⋯';
+  more.innerHTML=window.leeLearnIcon('moreHorizontal');
   more.title='Chat options';
   more.setAttribute('aria-label','Chat options');
   more.addEventListener('click',e=>{
@@ -195,20 +207,27 @@ function chatRow(chat) {
     openChatMenu(chat,more);
   });
 
-  actions.append(folderBtn,more);
+  actions.append(more);
   row.append(title,actions);
   requestAnimationFrame(()=>{
     if(titleText.scrollWidth > title.clientWidth + 4) title.classList.add('overflow');
   });
   return row;
 }
-let menuChatId=null, pendingDeleteChatId=null, renameChatId=null, moveChatId=null;
-function openChatMenu(chat,anchor){ closeChatMenu(); menuChatId=chat.id; const m=$('chatMenu'); $('chatMenuPin').textContent=chat.pinned?'☆ Unpin chat':'☆ Pin chat'; const r=anchor.getBoundingClientRect(); const w=190,h=115; let left=r.right-w,top=r.bottom+4; if(left<8)left=8;if(left+w>innerWidth-8)left=innerWidth-w-8;if(top+h>innerHeight-8)top=r.top-h-4;if(top<8)top=8;m.style.left=left+'px';m.style.top=top+'px';m.classList.add('open');}
-function closeChatMenu(){ $('chatMenu').classList.remove('open'); menuChatId=null; }
+let menuChatId=null, menuFolderId=null, pendingDeleteChatId=null, renameChatId=null, moveChatId=null;
+function positionPopupMenu(menu,anchor,height){const r=anchor.getBoundingClientRect(),w=190;let left=r.right-w,top=r.bottom+4;if(left<8)left=8;if(left+w>innerWidth-8)left=innerWidth-w-8;if(top+height>innerHeight-8)top=r.top-height-4;if(top<8)top=8;menu.style.left=left+'px';menu.style.top=top+'px';}
+function openChatMenu(chat,anchor){closeFolderMenu();closeChatMenu();menuChatId=chat.id;const m=$('chatMenu');$('chatMenuPin').querySelector('.ui-icon-label').textContent=chat.pinned?'Unpin chat':'Pin chat';positionPopupMenu(m,anchor,170);m.classList.add('open');}
+function closeChatMenu(){$('chatMenu').classList.remove('open');menuChatId=null;}
+function openFolderMenu(folder,anchor){closeChatMenu();closeFolderMenu();menuFolderId=folder.id;const menu=$('folderMenu');$('folderMenuPin').querySelector('.ui-icon-label').textContent=folder.pinned?'Unpin folder':'Pin folder';positionPopupMenu(menu,anchor,130);menu.classList.add('open');}
+function closeFolderMenu(){$('folderMenu').classList.remove('open');menuFolderId=null;}
 async function menuPin(){const c=state.chats.find(x=>String(x.id)===String(menuChatId));closeChatMenu();if(c)await togglePinChat(c);}
 function menuRename(){const c=state.chats.find(x=>String(x.id)===String(menuChatId));closeChatMenu();if(c)openRenameModal(c);}
 function menuDelete(){pendingDeleteChatId=menuChatId;closeChatMenu();if(pendingDeleteChatId)openDeleteModal();}
+function menuMove(){const id=menuChatId;closeChatMenu();if(id)openMoveModal(id);}
 async function togglePinChat(chat){const r=await fetch(`/api/chats/${chat.id}/pin`,{method:'POST'});const d=await r.json();if(d.ok){chat.pinned=!!d.pinned;renderSidebar();}}
+async function menuRenameFolder(){const folder=state.folders.find(item=>String(item.id)===String(menuFolderId));closeFolderMenu();if(!folder)return;const name=window.prompt('Rename folder',folder.name);if(name===null)return;const cleaned=name.trim();if(!cleaned)return;const response=await fetch(`/api/folders/${folder.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:cleaned})});const data=await response.json();if(!response.ok||!data.ok){showToast(data.error||'Could not rename folder.');return;}folder.name=data.folder.name;renderSidebar();}
+async function menuPinFolder(){const folder=state.folders.find(item=>String(item.id)===String(menuFolderId));closeFolderMenu();if(!folder)return;const response=await fetch(`/api/folders/${folder.id}/pin`,{method:'POST'});const data=await response.json();if(!response.ok||!data.ok){showToast(data.error||'Could not update folder pin.');return;}Object.assign(folder,data.folder);renderSidebar();}
+async function menuDeleteFolder(){const folder=state.folders.find(item=>String(item.id)===String(menuFolderId));closeFolderMenu();if(!folder)return;if(!window.confirm(`Delete folder "${folder.name}"? Its chats will be moved to Recent Chats.`))return;const response=await fetch(`/api/folders/${folder.id}`,{method:'DELETE'});const data=await response.json();if(!response.ok||!data.ok){showToast(data.error||'Could not delete folder.');return;}state.folders=state.folders.filter(item=>String(item.id)!==String(folder.id));state.chats.forEach(chat=>{if(String(chat.folder_id||'')===String(folder.id))chat.folder_id=null;});delete state.expandedFolders[String(folder.id)];localStorage.setItem('ai-lms-expanded-folders',JSON.stringify(state.expandedFolders));renderSidebar();}
 
 function openDeleteModal(){ $('chatActionModal').classList.add('open'); $('chatDeleteError').textContent=''; }
 function closeDeleteModal(){ $('chatActionModal').classList.remove('open'); pendingDeleteChatId=null; }
@@ -222,11 +241,12 @@ function openFolderModal(){$('folderInput').value='';$('folderError').textConten
 function closeFolderModal(){$('folderModal').classList.remove('open');}
 async function saveFolder(){const name=$('folderInput').value.trim();if(!name)return;const r=await fetch('/api/folders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});const d=await r.json();if(!d.ok){$('folderError').textContent=d.error||'Could not create folder.';return;}state.folders.unshift(d.folder);state.expandedFolders[String(d.folder.id)]=true;closeFolderModal();renderSidebar();}
 
-function openMoveModal(chatId){moveChatId=chatId;const box=$('folderChoices');box.innerHTML='';const none=document.createElement('button');none.className='folder-choice';none.innerHTML='<span>📂</span><span>Remove from folder</span>';none.onclick=()=>moveChat(chatId,null);box.appendChild(none);if(!state.folders.length){box.appendChild(emptyText('No folders created yet.'));}else state.folders.forEach(f=>{const b=document.createElement('button');b.className='folder-choice';b.innerHTML=`<span>📂</span><span>${escapeHtml(f.name)}</span><span class="choice-count">${state.chats.filter(c=>String(c.folder_id)===String(f.id)).length}</span>`;b.onclick=()=>moveChat(chatId,f.id);box.appendChild(b);});$('moveModal').classList.add('open');}
+function openMoveModal(chatId){moveChatId=chatId;const box=$('folderChoices');box.innerHTML='';const none=document.createElement('button');none.className='folder-choice';none.innerHTML=`<span class="ui-icon-slot">${window.leeLearnIcon('folder')}</span><span>Remove from folder</span>`;none.onclick=()=>moveChat(chatId,null);box.appendChild(none);if(!state.folders.length){box.appendChild(emptyText('No folders created yet.'));}else state.folders.forEach(f=>{const b=document.createElement('button');b.className='folder-choice';b.innerHTML=`<span class="ui-icon-slot">${window.leeLearnIcon('folder')}</span><span>${escapeHtml(f.name)}</span><span class="choice-count">${state.chats.filter(c=>String(c.folder_id)===String(f.id)).length}</span>`;b.onclick=()=>moveChat(chatId,f.id);box.appendChild(b);});$('moveModal').classList.add('open');}
 function closeMoveModal(){$('moveModal').classList.remove('open');moveChatId=null;}
 async function moveChat(chatId,folderId){const r=await fetch(`/api/chats/${chatId}/move`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder_id:folderId})});const d=await r.json();if(!d.ok){showToast(d.error||'Could not move chat.');return;}const c=state.chats.find(x=>String(x.id)===String(chatId));if(c)c.folder_id=folderId;closeMoveModal();renderSidebar();showToast(folderId?'Chat moved to folder.':'Chat removed from folder.');}
 
 async function createNewChat(){const r=await fetch('/api/chats',{method:'POST'});const d=await r.json();if(!d.ok){showToast(d.error||'Could not create chat.');return;}state.chats.unshift(d.chat);state.activeChatId=d.chat.id;renderSidebar();renderMessages([]);showWelcome();$('questionInput').focus();}
+async function createChatInFolder(folder){const response=await fetch(`/api/folders/${folder.id}/chats`,{method:'POST'});const data=await response.json();if(!response.ok||!data.ok){showToast(data.error||'Could not create chat in folder.');return;}state.chats.unshift(data.chat);state.activeChatId=data.chat.id;state.expandedFolders[String(folder.id)]=true;localStorage.setItem('ai-lms-expanded-folders',JSON.stringify(state.expandedFolders));$('chatSearch').value='';renderSidebar();renderMessages(data.chat.messages||[]);$('questionInput').focus();}
 async function selectChat(id){
   state.activeChatId=id;
   const r=await fetch(`/api/chats/${id}`);
@@ -269,23 +289,13 @@ function renderMessages(messages){
     return;
   }
   hideWelcome();
-  messages.forEach((m,i)=>appendMessage(m.role,m.content,m.sources||[],m.id||'',i,messages,m.youtube||null,m.learning_mode||false));
+  messages.forEach((m,i)=>appendMessage(m.role,m.content,m.sources||[],m.id||'',i,messages,m.youtube||null,m.learning_mode||false,m.diagram||null));
   const running=getActiveRunningJob();
   if(running) showThinking();
   scrollBottom(false);
 }
 function actionIcon(name){
-  const common='width=18 height=18 viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
-  const paths={
-    edit:`<svg ${common}><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z"></path><path d="M14.5 7.5l2 2"></path></svg>`,
-    copy:`<svg ${common}><rect x=8 y=8 width=11 height=11 rx=2></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>`,
-    retry:`<svg ${common}><path d="M20 11a8 8 0 0 0-14.9-4L3 10"></path><path d="M3 5v5h5"></path><path d="M4 13a8 8 0 0 0 14.9 4L21 14"></path><path d="M21 19v-5h-5"></path></svg>`,
-    folder:`<svg ${common}><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h4l2 2h7A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"></path><path d="M12 11v5M9.5 13.5h5"></path></svg>`,
-    pdf:`<svg ${common}><path d="M6 3h8l4 4v14H6z"></path><path d="M14 3v5h5"></path><path d="M8.5 16h7M8.5 12.5h3"></path></svg>`,
-    youtube:`<svg ${common}><rect x="3" y="6" width="18" height="12" rx="3"></rect><path d="M10 9l5 3-5 3V9Z" fill="currentColor" stroke="none"></path></svg>`,
-    sources:`<svg ${common}><path d="M5 4.5h9a3 3 0 0 1 3 3V20H8a3 3 0 0 1-3-3V4.5Z"></path><path d="M8 4.5v11.8c0 2 1.2 3.7 3.2 3.7"></path><path d="M8.5 8h5.5M8.5 11.5h5.5"></path></svg>`
-  };
-  return paths[name]||'';
+  return window.leeLearnIcon(name==='edit'?'pencil':name);
 }
 
 function ensureQuestionEditStyles(){
@@ -320,7 +330,7 @@ function ensureQuestionEditStyles(){
   document.head.appendChild(style);
 }
 
-function appendMessage(role,content,sources=[],messageId='',index=0,messages=[],youtube=null,learningMode=false){
+function appendMessage(role,content,sources=[],messageId='',index=0,messages=[],youtube=null,learningMode=false,diagram=null){
   hideWelcome();
   const wrap=document.createElement('article');
   wrap.className=`message ${role}`;
@@ -331,8 +341,15 @@ function appendMessage(role,content,sources=[],messageId='',index=0,messages=[],
   const bubble=document.createElement('div'); bubble.className='message-bubble';
 
   if(role==='assistant'){
-    bubble.innerHTML=formatAnswer(content||'');
+    try{
+      const rendered=formatAnswer(content||'');
+      if(rendered)bubble.innerHTML=rendered;
+      else bubble.textContent=content||'';
+    }catch(_){
+      bubble.textContent=content||'';
+    }
     body.appendChild(bubble);
+    appendGroundedDiagram(body,diagram);
   }else{
     bubble.textContent=content||'';
     body.appendChild(bubble);
@@ -346,11 +363,7 @@ function appendMessage(role,content,sources=[],messageId='',index=0,messages=[],
   }
 
   if(role==='assistant'){
-    if(sources.length){
-      const src=document.createElement('div'); src.className='sources';
-      src.textContent='Sources: '+uniqueSourceLabels(sources).join(' • ');
-      body.appendChild(src);
-    }
+    
     const actions=document.createElement('div'); actions.className='answer-actions';
     actions.innerHTML=`<button data-action="copy" title="Copy" aria-label="Copy">${actionIcon('copy')}</button><button data-action="retry" title="Try again" aria-label="Try again">${actionIcon('retry')}</button><button data-action="folder" title="Add to folder" aria-label="Add to folder">${actionIcon('folder')}</button><button data-action="pdf" title="Generate as PDF" aria-label="Generate as PDF">${actionIcon('pdf')}</button><button data-action="sources" title="View sources" aria-label="View sources">${actionIcon('sources')}</button><button data-action="youtube" title="Recommended YouTube video" aria-label="Recommended YouTube video">${actionIcon('youtube')}</button>`;
     actions.querySelector('[data-action=copy]').onclick=()=>copyAnswer(content||'');
@@ -364,6 +377,67 @@ function appendMessage(role,content,sources=[],messageId='',index=0,messages=[],
 
   wrap.appendChild(body);
   $('messages').appendChild(wrap);
+  if(role==='assistant')typesetAnswerMath(bubble);
+}
+
+let groundedDiagramSequence=0;
+function appendGroundedDiagram(body,diagram){
+  if(!diagram||diagram.grounded!==true||diagram.derived!==true||!diagram.mermaid)return;
+  const section=document.createElement('section');
+  section.className='grounded-diagram';
+  const label=document.createElement('div');
+  label.className='grounded-diagram-label';
+  label.textContent='Diagram derived from the course material';
+  const visual=document.createElement('div');
+  visual.className='grounded-diagram-visual';
+  section.append(label,visual);
+  body.appendChild(section);
+  renderGroundedMermaid(visual,diagram.mermaid);
+}
+
+function renderGroundedMermaid(container,source){
+  const showSource=()=>{
+    container.replaceChildren();
+    const pre=document.createElement('pre');
+    pre.className='answer-code-block';
+    const code=document.createElement('code');
+    code.className='language-mermaid';
+    code.textContent=source;
+    pre.appendChild(code);
+    container.appendChild(pre);
+  };
+
+  if(!window.mermaid||typeof window.mermaid.render!=='function'){
+    showSource();
+    return;
+  }
+
+  const diagramSource=String(source||'').trim();
+  if(!/^(?:flowchart|graph)\s+(?:TD|TB|BT|LR|RL)\b/.test(diagramSource)){
+    showSource();
+    return;
+  }
+
+  try{
+    if(!window.mermaidInitialized){
+      window.mermaid.initialize({
+        startOnLoad:false,
+        securityLevel:'strict',
+        theme:document.body.classList.contains('dark')?'dark':'default',
+        themeVariables:{fontSize:'12px'},
+        flowchart:{nodeSpacing:10,rankSpacing:12,diagramPadding:4,useMaxWidth:true,htmlLabels:true,curve:'linear'}
+      });
+      window.mermaidInitialized=true;
+    }
+    const id=`grounded-diagram-${++groundedDiagramSequence}`;
+    Promise.resolve(window.mermaid.render(id,diagramSource)).then(result=>{
+      if(!container.isConnected)return;
+      container.innerHTML=result.svg;
+      if(result.bindFunctions)result.bindFunctions(container);
+    }).catch(showSource);
+  }catch(_){
+    showSource();
+  }
 }
 
 async function copyQuestion(text){
@@ -388,7 +462,7 @@ function startInlineQuestionEdit(wrap,original,index){
 
   const box=document.createElement('div');
   box.className='question-edit-box';
-  box.innerHTML=`<textarea aria-label="Edit message"></textarea><div class="question-edit-actions"><button type="button" class="question-edit-cancel">Cancel</button><button type="button" class="question-edit-send">Send</button></div>`;
+  box.innerHTML=`<textarea aria-label="Edit message"></textarea><div class="question-edit-actions"><button type="button" class="question-edit-cancel"><span class="ui-icon-slot">${window.leeLearnIcon('x')}</span><span>Cancel</span></button><button type="button" class="question-edit-send"><span class="ui-icon-slot">${window.leeLearnIcon('send')}</span><span>Send</span></button></div>`;
   const textarea=box.querySelector('textarea'); textarea.value=original;
   oldBubble.style.display='none'; if(oldActions)oldActions.style.display='none'; body.appendChild(box);
 
@@ -448,47 +522,269 @@ function uniqueSourceLabels(sources){
   return out;
 }
 
-function formatTableCell(cell){
-  let v=cell.trim();
-  v=v.replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
-  v=v.replace(/`([^`]+)`/g,'<code class="inline-code">$1</code>');
-  return v;
+function normalizeEscapedMarkdown(text){
+  return String(text).replace(/\r\n?/g,'\n')
+    .replace(/^(\s*)\\(#{1,6})(?=\s)/gm,'$1$2')
+    .replace(/^(\s*)\\([-+*])(?=\s)/gm,'$1$2')
+    .replace(/^(\s*)\\(>)(?=\s)/gm,'$1$2')
+    .replace(/^(\s*)\\([-*_]{3,})\s*$/gm,'$1$2')
+    .replace(/^(\s*)\\(`{3,}|~{3,})(.*)$/gm,'$1$2$3')
+    .replace(/\\\*\\\*(\S(?:.*?\S)?)\\\*\\\*/g,'**$1**')
+    .replace(/\\\*\*(\S(?:.*?\S)?)\\\*\*/g,'**$1**')
+    .replace(/\\\*([^*\s](?:[^*\n]*?[^*\s])?)\\\*/g,'*$1*')
+    .replace(/\\`([^`\n]+)\\`/g,'`$1`');
 }
 
-function formatMarkdownTables(s){
-  const lines=s.split('\n'),out=[]; let i=0;
-  const separator=/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/;
-  while(i<lines.length){
-    const line=lines[i], next=lines[i+1]||'';
-    if(line.includes('|')&&separator.test(next)){
-      const headers=line.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(formatTableCell);
-      i+=2; const rows=[];
-      while(i<lines.length&&lines[i].includes('|')&&lines[i].trim()!==''){
-        rows.push(lines[i].trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(formatTableCell)); i++;
-      }
-      let html='<div class="table-scroll"><table class="answer-table"><thead><tr>';
-      headers.forEach(c=>html+=`<th>${c}</th>`); html+='</tr></thead><tbody>';
-      rows.forEach(cells=>{html+='<tr>'; for(let j=0;j<headers.length;j++) html+=`<td>${cells[j]||''}</td>`; html+='</tr>';});
-      html+='</tbody></table></div>'; out.push(html); continue;
-    }
-    out.push(line); i++;
+function formatInlineMarkdown(text){
+  let value=escapeHtml(text);
+  const codeSpans=[];
+  const mathSpans=[];
+  value=value.replace(/`([^`\n]+)`/g,(_,code)=>{
+    const token=`\u0000INLINECODE${codeSpans.length}\u0000`;
+    codeSpans.push(`<code class="inline-code">${code}</code>`);
+    return token;
+  });
+  value=value.replace(/\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$\$[\s\S]*?\$\$|\$(?!\$)[^$\n]+\$/g,math=>{
+    const token=`\u0000INLINEMATH${mathSpans.length}\u0000`;
+    mathSpans.push(math);
+    return token;
+  });
+  const generatedMath=[];
+  const wrapMath=(_,prefix,expression)=>{
+    const token=`\u0000GENERATEDMATH${generatedMath.length}\u0000`;
+    generatedMath.push(`$${expression}$`);
+    return `${prefix}${token}`;
+  };
+  value=value.replace(/&lt;\s*br\s*\/?\s*&gt;|&lt;\s*\/br\s*&gt;/gi,'<br>');
+  value=value.replace(/(^|[^\w$])(\(\s*[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9]+\s*,\s*[A-Za-z0-9]+\s*\))(?![\w$])/g,wrapMath);
+  value=value.replace(/(^|[^\w$])((?:\d+\s*)?\(\s*[A-Za-z]\s*[-+]\s*\d+\s*\))(?![\w$])/g,wrapMath);
+  value=value.replace(/(^|[^\w$])([A-Za-z]\s*[-+]\s*\d+)(?![\w$])/g,wrapMath);
+  value=value.replace(/(^|[^\w$])([A-Za-z][A-Za-z0-9]*_[A-Za-z0-9]+)(?![\w$])/g,(_,prefix,expression)=>`${prefix}$${expression}$`);
+  value=value.replace(/\*\*(\S(?:.*?\S)?)\*\*/g,'<strong>$1</strong>');
+  value=value.replace(/__((?:\S).*?\S)__/g,'<strong>$1</strong>');
+  value=value.replace(/(^|[^\w*])\*([^*\n]+)\*(?!\*)/g,'$1<em>$2</em>');
+  value=value.replace(/(^|[^\w_])_([^_\n]+)_(?!\w)/g,'$1<em>$2</em>');
+  mathSpans.forEach((math,index)=>{value=value.replace(`\u0000INLINEMATH${index}\u0000`,math);});
+  generatedMath.forEach((math,index)=>{value=value.replace(`\u0000GENERATEDMATH${index}\u0000`,math);});
+  codeSpans.forEach((code,index)=>{value=value.replace(`\u0000INLINECODE${index}\u0000`,code);});
+  return value;
+}
+
+function showReadableMath(element){
+  const walker=document.createTreeWalker(element,NodeFilter.SHOW_TEXT);
+  const textNodes=[];
+  while(walker.nextNode()){
+    if(!walker.currentNode.parentElement?.closest('pre,code,mjx-container'))textNodes.push(walker.currentNode);
   }
-  return out.join('\n');
+  textNodes.forEach(node=>{
+    node.nodeValue=node.nodeValue.replace(/\\\((.*?)\\\)|\\\[(.*?)\\\]|\$\$(.*?)\$\$|\$(?!\$)([^$\n]+)\$/g,(_,inline,display,block,dollar)=>inline??display??block??dollar);
+  });
+}
+
+function typesetAnswerMath(element){
+  const typeset=()=>{
+    try{
+      if(!window.MathJax?.typesetPromise){showReadableMath(element);return;}
+      const pending=window.MathJax.typesetPromise([element]);
+      if(pending&&typeof pending.catch==='function')pending.catch(()=>showReadableMath(element));
+    }catch(_){showReadableMath(element);}
+  };
+  if(window.MathJax?.typesetPromise){typeset();return;}
+  if(!window.aiLmsMathJaxLoadPromise){
+    window.MathJax=window.MathJax||{
+      tex:{inlineMath:[['$','$'],['\\(','\\)']],displayMath:[['$$','$$'],['\\[','\\]']],processEscapes:true},
+      options:{skipHtmlTags:['script','noscript','style','textarea','pre','code']},
+      startup:{typeset:false}
+    };
+    window.aiLmsMathJaxLoadPromise=new Promise(resolve=>{
+      const script=document.createElement('script');
+      script.src='https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js';
+      script.onload=resolve;
+      script.onerror=resolve;
+      document.head.appendChild(script);
+    });
+  }
+  window.aiLmsMathJaxLoadPromise.then(typeset);
+}
+
+function splitMarkdownTableRow(line){
+  return line.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(cell=>cell.trim());
+}
+
+function isMarkdownTableSeparator(line){
+  const cells=splitMarkdownTableRow(line);
+  return cells.length>1&&cells.every(cell=>/^:?-{3,}:?$/.test(cell));
+}
+
+function renderMarkdownTable(headerLine,bodyLines){
+  const headers=splitMarkdownTableRow(headerLine);
+  const rows=bodyLines.map(splitMarkdownTableRow);
+  let html='<div class="table-scroll"><table class="answer-table"><thead><tr>';
+  headers.forEach(cell=>html+=`<th>${formatInlineMarkdown(cell)}</th>`);
+  html+='</tr></thead><tbody>';
+  rows.forEach(row=>{
+    html+='<tr>';
+    headers.forEach((_,index)=>html+=`<td>${formatInlineMarkdown(row[index]||'')}</td>`);
+    html+='</tr>';
+  });
+  return html+'</tbody></table></div>';
+}
+
+function renderMarkdownList(lines,start){
+  const first=normalizeEscapedMarkdown(lines[start]).match(/^([ \t]*)([-+*]|\d+[.)])\s+(.+)$/);
+  const baseIndent=first[1].replace(/\t/g,'    ').length;
+  const ordered=/^\d/.test(first[2]);
+  const tag=ordered?'ol':'ul';
+  const items=[];
+  let index=start;
+
+  while(index<lines.length){
+    const match=normalizeEscapedMarkdown(lines[index]).match(/^([ \t]*)([-+*]|\d+[.)])\s+(.+)$/);
+    if(!match)break;
+    const indent=match[1].replace(/\t/g,'    ').length;
+    if(indent<baseIndent)break;
+    if(indent>baseIndent){
+      if(!items.length)break;
+      const nested=renderMarkdownList(lines,index);
+      if(nested.nextIndex===index)break;
+      items[items.length-1].children+=nested.html;
+      index=nested.nextIndex;
+      continue;
+    }
+    if(/^\d/.test(match[2])!==ordered)break;
+    items.push({text:match[3],children:''});
+    index++;
+  }
+
+  const html=`<${tag}>${items.map(item=>`<li>${formatInlineMarkdown(item.text)}${item.children}</li>`).join('')}</${tag}>`;
+  return {html,nextIndex:index};
+}
+
+function isAsciiBoxLine(line){
+  return /^\s*\+[-=+]+\+\s*$/.test(line)||/^\s*\|[^\n]*\|\s*$/.test(line);
+}
+
+function isAsciiBoxDiagram(lines){
+  return lines.filter(line=>/^\s*\+[-=+]+\+\s*$/.test(line)).length>=2
+    &&lines.some(line=>/^\s*\|[^\n]*\|\s*$/.test(line));
+}
+
+function renderCodeBlock(code,language='',blockClass=''){
+  const validLanguage=/^[a-zA-Z0-9_-]+$/.test(language);
+  const safeLanguage=validLanguage?` language-${language}`:'';
+  const safeBlockClass=blockClass==='fenced-code-block'?' fenced-code-block':'';
+  const languageLabel=blockClass==='fenced-code-block'&&validLanguage?` data-language="${escapeHtml(language)}"`:'';
+  return `<pre class="answer-code-block${safeBlockClass}"${languageLabel}><code class="${safeLanguage.trim()}">${escapeHtml(code)}</code></pre>`;
 }
 
 function formatAnswer(text){
-  let s=escapeHtml(String(text));
-  s=formatMarkdownTables(s);
-  s=s.replace(/```([\s\S]*?)```/g,'<pre><code>$1</code></pre>');
-  s=s.replace(/^### (.*)$/gm,'<h4>$1</h4>').replace(/^## (.*)$/gm,'<h3>$1</h3>').replace(/^# (.*)$/gm,'<h2>$1</h2>');
-  s=s.replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
-  s=s.replace(/`([^`]+)`/g,'<code class="inline-code">$1</code>');
-  s=s.replace(/^\s*[-•] (.*)$/gm,'<li>$1</li>');
-  s=s.replace(/(<li>[\s\S]*?<\/li>)/g,'<ul>$1</ul>');
-  s=s.replace(/^(\d+\. )(.+)$/gm,'<div class="numbered"><strong>$1</strong>$2</div>');
-  s=s.replace(/\n/g,'<br>');
-  s=s.replace(/<\/ul><br><ul>/g,'</ul><ul>');
-  return s;
+  const sourceLines=String(text||'').replace(/\r\n?/g,'\n').split('\n');
+  const fencedBlocks=[];
+  const lines=[];
+  for(let sourceIndex=0;sourceIndex<sourceLines.length;){
+    const fence=normalizeEscapedMarkdown(sourceLines[sourceIndex]).match(/^\s*(`{3,}|~{3,})(.*)$/);
+    if(!fence){
+      lines.push(sourceLines[sourceIndex++]);
+      continue;
+    }
+    const language=(fence[2].trim().match(/^[a-zA-Z0-9_-]+/)||[])[0]||'';
+    const close=new RegExp(`^\\s*${fence[1][0]}{${fence[1].length},}\\s*$`);
+    const code=[];
+    sourceIndex++;
+    while(sourceIndex<sourceLines.length&&!close.test(normalizeEscapedMarkdown(sourceLines[sourceIndex])))code.push(sourceLines[sourceIndex++]);
+    if(sourceIndex<sourceLines.length)sourceIndex++;
+    const token=`\u0000FENCEDCODE${fencedBlocks.length}\u0000`;
+    fencedBlocks.push(renderCodeBlock(code.join('\n'),language,'fenced-code-block'));
+    lines.push(token);
+  }
+  const output=[];
+  let paragraph=[];
+  let index=0;
+  const flushParagraph=()=>{
+    if(paragraph.length){
+      output.push(`<p>${paragraph.map(formatInlineMarkdown).join('<br>')}</p>`);
+      paragraph=[];
+    }
+  };
+
+  while(index<lines.length){
+    const line=normalizeEscapedMarkdown(lines[index]);
+    const protectedCode=line.match(/^\u0000FENCEDCODE(\d+)\u0000$/);
+    if(protectedCode){
+      flushParagraph();
+      output.push(fencedBlocks[Number(protectedCode[1])]);
+      index++;
+      continue;
+    }
+
+    const heading=line.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if(heading){
+      flushParagraph();
+      const level=heading[1].length;
+      output.push(`<h${level}>${formatInlineMarkdown(heading[2])}</h${level}>`);
+      index++;
+      continue;
+    }
+
+    if(/^\s{0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/.test(line)){
+      flushParagraph();
+      output.push('<hr>');
+      index++;
+      continue;
+    }
+
+    if(index+1<lines.length&&line.includes('|')&&isMarkdownTableSeparator(normalizeEscapedMarkdown(lines[index+1]))){
+      flushParagraph();
+      const body=[];
+      index+=2;
+      while(index<lines.length&&normalizeEscapedMarkdown(lines[index]).includes('|')&&lines[index].trim())body.push(normalizeEscapedMarkdown(lines[index++]));
+      output.push(renderMarkdownTable(line,body));
+      continue;
+    }
+
+    const quote=line.match(/^ {0,3}>\s?(.*)$/);
+    if(quote){
+      flushParagraph();
+      const quoted=[];
+      while(index<lines.length){
+        const match=normalizeEscapedMarkdown(lines[index]).match(/^ {0,3}>\s?(.*)$/);
+        if(!match)break;
+        quoted.push(formatInlineMarkdown(match[1]));
+        index++;
+      }
+      output.push(`<blockquote>${quoted.join('<br>')}</blockquote>`);
+      continue;
+    }
+
+    if(/^\s*([-+*]|\d+[.)])\s+/.test(line)){
+      flushParagraph();
+      const list=renderMarkdownList(lines,index);
+      output.push(list.html);
+      index=list.nextIndex;
+      continue;
+    }
+
+    if(isAsciiBoxLine(line)){
+      let end=index;
+      while(end<lines.length&&normalizeEscapedMarkdown(lines[end]).trim())end++;
+      const diagram=lines.slice(index,end).map(normalizeEscapedMarkdown);
+      if(isAsciiBoxDiagram(diagram)){
+        flushParagraph();
+        output.push(renderCodeBlock(diagram.join('\n'),'text'));
+        index=end;
+        continue;
+      }
+      paragraph.push(line);
+      index++;
+      continue;
+    }
+
+    if(!line.trim())flushParagraph();
+    else paragraph.push(line);
+    index++;
+  }
+  flushParagraph();
+  return output.join('');
 }
 
 function escapeHtml(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -744,7 +1040,7 @@ function toggleSidebar(){
 function openSidebar(){document.body.classList.remove('sidebar-collapsed');document.body.classList.add('sidebar-open');$('sidebarToggle').setAttribute('aria-label','Hide sidebar');$('sidebarToggle').setAttribute('title','Hide sidebar');}
 function closeSidebar(){document.body.classList.remove('sidebar-open');document.body.classList.add('sidebar-collapsed');$('sidebarToggle').setAttribute('aria-label','Show sidebar');$('sidebarToggle').setAttribute('title','Show sidebar');}
 function toggleTheme(){state.dark=!state.dark;localStorage.setItem('ai-lms-theme',state.dark?'dark':'light');applyTheme();}
-function applyTheme(){document.body.classList.toggle('dark',state.dark);$('themeBtn').textContent=state.dark?'☾':'☼';}
+function applyTheme(){document.body.classList.toggle('dark',state.dark);$('themeBtn').innerHTML=window.leeLearnIcon(state.dark?'moon':'sun');}
 async function copyAnswer(text){try{await navigator.clipboard.writeText(text);showToast('Answer copied.');}catch(_){showToast('Copy was not available.');}}
 async function retryAnswer(messageId){
   if(state.polling)return;
@@ -767,12 +1063,12 @@ async function retryAnswer(messageId){
   state.pollingJobId=d.job_id;
   pollJob(d.job_id,id);
 }
-async function downloadAnswerPdf(chatId,messageId){showToast('Preparing PDF...');const r=await fetch(`/api/chats/${chatId}/answer-pdf`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message_id:messageId})});if(!r.ok){const d=await r.json().catch(()=>({}));showToast(d.error||'Could not create PDF.');return;}const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='AI-LMS-Answer.pdf';a.click();URL.revokeObjectURL(url);showToast('PDF generated.');}
+async function downloadAnswerPdf(chatId,messageId){showToast('Preparing PDF...');const r=await fetch(`/api/chats/${chatId}/answer-pdf`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message_id:messageId})});if(!r.ok){const d=await r.json().catch(()=>({}));showToast(d.error||'Could not create PDF.');return;}const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='LeeLearn-Answer.pdf';a.click();URL.revokeObjectURL(url);showToast('PDF generated.');}
 function showToast(text){const t=$('toast');t.textContent=text;t.classList.add('show');clearTimeout(showToast.timer);showToast.timer=setTimeout(()=>t.classList.remove('show'),2200);}
 
 function showBackgroundCompletionNotification(chatId, answer){
   const chat=state.chats.find(c=>String(c.id)===String(chatId));
-  const title=chat?.title || 'AI Tutor';
+  const title=chat?.title || 'Lee AI Tutor';
   const preview=String(answer || '').replace(/\s+/g,' ').trim();
 
   const notification={
@@ -809,7 +1105,7 @@ function renderBackgroundNotifications(){
         <div class="background-notification-chat">${escapeHtml(notification.title)}</div>
         <div class="background-notification-preview">${escapeHtml(notification.preview)}</div>
       </div>
-      <button type="button" class="background-notification-close" aria-label="Dismiss notification">×</button>
+      <button type="button" class="background-notification-close" aria-label="Dismiss notification">${window.leeLearnIcon('x')}</button>
     `;
 
     item.addEventListener('click',async e=>{
@@ -980,11 +1276,11 @@ async function toggleYoutubeForMessage(anchor,messageId,answer,existing,learning
 function showYoutubePopover(anchor,video){
   const pop=$('youtubePopover'); if(!pop)return;
   if(!video){
-    pop.innerHTML='<div class="youtube-popover-head"><span class="youtube-play-mini">'+actionIcon('youtube')+'</span><div><strong>YouTube recommendation</strong><small>No direct video was found</small></div><button class="youtube-close" aria-label="Close">×</button></div><div class="youtube-empty">No suitable educational video was found for this topic.</div><button class="youtube-search" type="button">Search this topic on YouTube</button>';
+    pop.innerHTML='<div class="youtube-popover-head"><span class="youtube-play-mini">'+actionIcon('youtube')+'</span><div><strong>YouTube recommendation</strong><small>No direct video was found</small></div><button class="youtube-close" type="button" aria-label="Close">'+actionIcon('x')+'</button></div><div class="youtube-empty">No suitable educational video was found for this topic.</div><button class="youtube-search" type="button">'+actionIcon('search')+'<span>Search this topic on YouTube</span></button>';
     pop.querySelector('.youtube-search').onclick=()=>{const active=state.chats.find(c=>String(c.id)===String(state.activeChatId));const msgs=active?.messages||[];let q='';for(let i=msgs.length-1;i>=0;i--){if(msgs[i].role==='user'){q=msgs[i].content||'';break;}}window.open('https://www.youtube.com/results?search_query='+encodeURIComponent(q),'_blank','noopener,noreferrer');};
   }else{
     const title=escapeHtml(video.title||'Recommended video'),channel=escapeHtml(video.channel||'YouTube'),url=String(video.url||'');
-    pop.innerHTML=`<div class="youtube-popover-head"><span class="youtube-play-mini">${actionIcon('youtube')}</span><div><strong>Recommended video</strong><small>${channel}</small></div><button class="youtube-close" aria-label="Close">×</button></div><div class="youtube-video-title">${title}</div><a class="youtube-watch" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Watch on YouTube</a>`;
+    pop.innerHTML=`<div class="youtube-popover-head"><span class="youtube-play-mini">${actionIcon('youtube')}</span><div><strong>Recommended video</strong><small>${channel}</small></div><button class="youtube-close" type="button" aria-label="Close">${actionIcon('x')}</button></div><div class="youtube-video-title">${title}</div><a class="youtube-watch" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Watch on YouTube</a>`;
   }
   pop.querySelector('.youtube-close').onclick=closeYoutubePopover;
   pop.classList.add('open'); pop.setAttribute('aria-hidden','false');
@@ -1001,7 +1297,7 @@ function showSourcesPopover(anchor,sources){
   closeYoutubePopover(); const pop=$('sourcesPopover'); if(!pop)return;
   const unique=[],seen=new Set();
   (sources||[]).forEach(x=>{if(!x)return;const name=typeof x==='string'?x:(x.title||x.name||x.filename||x.material_name||'Course material');const page=typeof x==='object'&&x&&x.page?x.page:null;const key=name+'|'+(page||'');if(!seen.has(key)){seen.add(key);unique.push({name,page,url:typeof x==='object'?x.url:null});}});
-  pop.innerHTML='<div class="sources-popover-head"><span class="sources-book">'+actionIcon('sources')+'</span><div><strong>Course Material Sources</strong><small>The material pages used for this answer</small></div><button class="sources-close" aria-label="Close">×</button></div><div class="sources-list">'+unique.map(x=>`<div class="source-item"><strong>${escapeHtml(x.name)}</strong>${x.page?`<span>Page ${escapeHtml(x.page)}</span>`:''}${x.url?`<a href="${escapeHtml(x.url)}" target="_blank" rel="noopener noreferrer">Open source</a>`:''}</div>`).join('')+'</div>';
+  pop.innerHTML='<div class="sources-popover-head"><span class="sources-book">'+actionIcon('sources')+'</span><div><strong>Course Material Sources</strong><small>The material pages used for this answer</small></div><button class="sources-close" type="button" aria-label="Close">'+actionIcon('x')+'</button></div><div class="sources-list">'+unique.map(x=>`<div class="source-item"><strong>${escapeHtml(x.name)}</strong>${x.page?`<span>Page ${escapeHtml(x.page)}</span>`:''}${x.url?`<a href="${escapeHtml(x.url)}" target="_blank" rel="noopener noreferrer">Open source</a>`:''}</div>`).join('')+'</div>';
   pop.querySelector('.sources-close').onclick=closeSourcesPopover;
   pop.classList.add('open');pop.setAttribute('aria-hidden','false');
   const r=anchor.getBoundingClientRect(),width=Math.min(380,window.innerWidth-20);pop.style.width=width+'px';pop.style.left=Math.max(10,Math.min(window.innerWidth-width-10,r.left-width+40))+'px';pop.style.top='10px';const h=pop.offsetHeight;let top=r.bottom+8;if(top+h>window.innerHeight-10)top=r.top-h-8;if(top<10)top=10;pop.style.top=top+'px';

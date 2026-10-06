@@ -10,12 +10,12 @@ LOG_DIR=BASE_DIR/'logs'; LOG_DIR.mkdir(exist_ok=True)
 logging.basicConfig(filename=str(LOG_DIR/'ai_worker.log'),level=logging.INFO,format='%(asctime)s | %(levelname)s | %(message)s')
 
 def normalize(raw):
-    if isinstance(raw,str): return {'answer':raw,'sources':[]}
-    if not isinstance(raw,dict): return {'answer':str(raw),'sources':[]}
-    if 'answer' in raw: return {'answer':str(raw.get('answer','')),'sources':raw.get('sources',[]) or []}
+    if isinstance(raw,str): return {'answer':raw,'sources':[],'diagram':None}
+    if not isinstance(raw,dict): return {'answer':str(raw),'sources':[],'diagram':None}
+    if 'answer' in raw: return {'answer':str(raw.get('answer','')),'sources':raw.get('sources',[]) or [],'diagram':raw.get('diagram')}
     nested=raw.get('result')
     if isinstance(nested,dict): return normalize(nested)
-    return {'answer':str(raw.get('content') or raw.get('response') or raw.get('text') or 'I could not generate an answer.'),'sources':raw.get('sources',[]) or []}
+    return {'answer':str(raw.get('content') or raw.get('response') or raw.get('text') or 'I could not generate an answer.'),'sources':raw.get('sources',[]) or [],'diagram':raw.get('diagram')}
 
 def main(request_path,result_path):
     data={}

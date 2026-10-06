@@ -364,6 +364,142 @@ def _keyword_bonus(query: str, text: str, topic: str) -> float:
     return bonus
 
 
+def _definition_subject(query: str) -> Optional[str]:
+    """Extract the concept named by a definition-style question."""
+    patterns = (
+        r"^\s*what\s+(?:is|are)\s+(.+?)\s*[?.!]*\s*$",
+        r"^\s*define\s+(.+?)\s*[?.!]*\s*$",
+        r"^\s*definition\s+of\s+(.+?)\s*[?.!]*\s*$",
+        r"^\s*what\s+does\s+(.+?)\s+mean\s*[?.!]*\s*$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, query, flags=re.IGNORECASE)
+        if match:
+            subject = match.group(1).strip()
+            subject = re.sub(r"^(?:the|a|an)\s+", "", subject, flags=re.IGNORECASE)
+            if re.search(r"[^\W_]", subject, flags=re.UNICODE):
+                return subject
+    return None
+
+
+def _normalise_definition_text(value: str) -> str:
+    value = value.lower()
+    value = re.sub(r"(?<=[a-z0-9])[-\u00ad]\s*(?=[a-z0-9])", "", value)
+    return " ".join(re.findall(r"\w+", value, flags=re.UNICODE))
+
+
+def _definition_heading(item: Dict[str, Any]) -> str:
+    """Collect available heading metadata, including builders' plural topics field."""
+    headings = []
+    for key in ("topic", "topic_name", "section", "title", "topics"):
+        value = item.get(key)
+        if isinstance(value, (list, tuple)):
+            headings.extend(str(part) for part in value if part)
+        elif value:
+            headings.append(str(value))
+    return " ".join(headings)
+
+
+def _definition_intent_bonus(
+    subject: str,
+    item: Dict[str, Any],
+    text: str,
+    page: Optional[int],
+    first_page: Optional[int],
+) -> float:
+    """Rerank definition queries toward explicit, introductory concept evidence."""
+    phrase = _normalise_definition_text(subject)
+    if not phrase:
+        return 0.0
+
+    heading = _normalise_definition_text(_definition_heading(item))
+    body = text.lower()
+    subject_words = re.findall(r"\w+", phrase, flags=re.UNICODE)
+    phrase_pattern = r"[\s\-\u00ad]+".join(re.escape(word) for word in subject_words)
+    phrase_pattern = rf"\b{phrase_pattern}\b"
+    in_body = re.search(phrase_pattern, body) is not None
+
+    # Cues must describe the concept in the chunk body itself. Keep the phrase
+    # adjacent to its predicate so punctuation cannot join unrelated clauses
+    # (for example, "stage of NLP, is the process" defining tokenization).
+    definition_patterns = (
+        rf"{phrase_pattern}\s+(?:can be\s+)?defined as\b",
+        rf"{phrase_pattern}\s+refers to\b",
+        rf"{phrase_pattern}\s+is (?:a|an|the)\b",
+        rf"{phrase_pattern}\s+means\b",
+        rf"\bdefinition of\s+{phrase_pattern}\b",
+    )
+    has_definition_cue = any(re.search(pattern, body) for pattern in definition_patterns)
+
+    explanatory_patterns = (
+        rf"\b(?:an?|the)\s+(?:(?:early|first|basic|modern|common|typical|important)\s+)"
+        rf"{phrase_pattern}\s+(?:system|field|discipline|area|process|task|technology|"
+        rf"method|approach|technique|study)\b",
+        rf"\bthis (?:chapter|section)\s+(?:introduces|describes|explains|defines)\s+"
+        rf"{phrase_pattern}\b",
+        rf"\bin this (?:chapter|section)\s+we\s+(?:introduce|describe|explain|define)\s+"
+        rf"{phrase_pattern}\b",
+    )
+    has_explanatory_cue = any(re.search(pattern, body) for pattern in explanatory_patterns)
+    section = _normalise_definition_text(str(item.get("section") or ""))
+    has_intro_section_evidence = (
+        in_body
+        and bool(re.search(r"\bintroduction\b", section))
+        and len(re.findall(r"[.!?]", text)) >= 2
+    )
+    has_real_definition = has_definition_cue or has_explanatory_cue or has_intro_section_evidence
+
+    # Front matter often repeats the concept in a book title. Treat it as
+    # metadata, not evidence, unless the chunk also contains a real definition.
+    metadata_markers = (
+        "copyright",
+        "all rights reserved",
+        "isbn",
+        "published by",
+        "printed in",
+        "draft of",
+        "edition",
+        "university",
+        "table of contents",
+    )
+    metadata_marker_count = sum(1 for marker in metadata_markers if marker in body[:1200])
+    section_is_front_matter = bool(
+        re.search(r"\b(?:cover|title page|copyright|contents|front matter)\b", section)
+    )
+    is_front_matter = section_is_front_matter or metadata_marker_count >= 2
+
+    # Only definition prose receives a meaningful positive rerank. A heading
+    # match may strengthen that prose, but a title or other metadata alone
+    # cannot earn the bonus.
+    bonus = 0.0
+    if in_body and has_real_definition and not is_front_matter:
+        bonus += 0.22 if has_definition_cue else 0.18
+        if phrase in heading:
+            bonus += 0.04
+        if page is not None and first_page is not None:
+            distance_from_start = page - first_page
+            if 0 <= distance_from_start <= 6:
+                bonus += 0.03
+    elif in_body and not is_front_matter:
+        # An isolated mention is weak evidence and should not beat an
+        # explanatory definition simply by repeating the queried phrase.
+        bonus -= 0.12
+
+    structural_text = f"{heading} {_normalise_definition_text(text[:500])}"
+    if re.search(r"\b(?:bibliography|references|works cited|literature cited)\b", structural_text):
+        bonus -= 0.35
+    if re.search(r"\btable of contents\b", structural_text) or section == "contents":
+        bonus -= 0.35
+    if re.search(r"\b(?:historical notes?|history of|history)\b", f"{heading} {structural_text}"):
+        bonus -= 0.12
+    if re.search(r"\bcontinued(?:\s*\.{1,3})?\b", f"{heading} {text[:180].lower()} {text[-120:].lower()}"):
+        bonus -= 0.12
+    if is_front_matter and not has_real_definition:
+        bonus -= 0.50
+
+    return max(-0.60, min(0.32, bonus))
+
+
 def search(
     query: str,
     course_id: Optional[str] = None,
@@ -429,6 +565,24 @@ def search(
 
     course_filter = _normalise(course_id).lower()
     material_filter = _normalise(material_id).lower()
+    definition_subject = _definition_subject(query)
+
+    first_page_by_group = {}
+    if definition_subject:
+        for item in chunks:
+            if not isinstance(item, dict):
+                continue
+            item_course = _get_course(item)
+            item_material = _get_material(item)
+            if course_filter and item_course.lower() != course_filter:
+                continue
+            if material_filter and item_material.lower() != material_filter:
+                continue
+            page = _get_page(item)
+            if page is None:
+                continue
+            group = (item_course, item_material)
+            first_page_by_group[group] = min(page, first_page_by_group.get(group, page))
 
     for i, item in enumerate(chunks):
         if not isinstance(item, dict):
@@ -450,7 +604,17 @@ def search(
         semantic_score = float(np.dot(qvec, embeddings[i]))
         topic = _get_topic(item)
         bonus = _keyword_bonus(query, text, topic)
-        final_score = semantic_score + bonus
+        definition_bonus = 0.0
+        if definition_subject:
+            group = (item_course, item_material)
+            definition_bonus = _definition_intent_bonus(
+                definition_subject,
+                item,
+                text,
+                _get_page(item),
+                first_page_by_group.get(group),
+            )
+        final_score = semantic_score + bonus + definition_bonus
 
         candidates.append(
             (

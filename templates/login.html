@@ -3,14 +3,15 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>AI-LMS Login</title>
+    <title>LeeLearn – AI-Powered Learning Management System</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui_icons.css') }}">
 </head>
 <body class="auth-page">
     <div class="auth-card">
         <div class="brand-mark">AI</div>
-        <h1>AI-LMS</h1>
-        <p class="muted">AI-powered personalized learning</p>
+        <h1>LeeLearn</h1>
+        <p class="muted">AI-Powered Learning Management System</p>
 
         <form id="loginForm">
             <label>Email</label>
@@ -19,7 +20,7 @@
             <label>Password</label>
             <input id="password" type="password" required autocomplete="current-password">
 
-            <button class="primary-btn" type="submit">Login</button>
+            <button class="primary-btn" type="submit"><span class="ui-icon-slot" data-icon="logIn"></span><span>Login</span></button>
             <p id="loginError" class="error-text"></p>
         </form>
 
@@ -30,11 +31,12 @@
             <input id="registerName" placeholder="Name" required>
             <input id="registerEmail" type="email" placeholder="Email" required>
             <input id="registerPassword" type="password" placeholder="Password" required>
-            <button class="secondary-btn" type="submit">Create account</button>
+            <button class="secondary-btn" type="submit"><span class="ui-icon-slot" data-icon="userPlus"></span><span>Create account</span></button>
             <p id="registerMessage" class="muted"></p>
         </form>
     </div>
 
+<script src="{{ url_for('static', filename='js/ui_icons.js') }}"></script>
 <script>
 const loginForm = document.getElementById("loginForm");
 const registerForm = document.getElementById("registerForm");

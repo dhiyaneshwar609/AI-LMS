@@ -3,7 +3,7 @@
 #
 # Uses:
 #   RAG V2 results
-#   Ollama + Gemma 3 4B
+#   Hosted two-LLM generation + verification
 #
 # Main goal:
 #   Generate an exam-style answer ONLY from retrieved course material.
@@ -17,23 +17,14 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
-import requests
+from hosted_llm import generate_draft, verify_and_correct
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
-OLLAMA_MODEL = "gemma3:4b"
-
-OLLAMA_TIMEOUT = 180
-
-NUM_CTX = 4096
-NUM_PREDICT = 500
-
 MAX_CONTEXT_CHARS = 7500
-
 GROUNDING_THRESHOLD = 0.42
 
 
@@ -152,6 +143,64 @@ def _sentences(text: str) -> List[str]:
 
 
 # ============================================================
+# DEFINITION FOCUS
+# ============================================================
+
+def _definition_candidates(question: str, results: List[Dict[str, Any]], limit: int = 8) -> List[str]:
+    """Prefer explicit definition evidence over merely related facts."""
+    terms = _words(question)
+    source = _source_text(results)
+    sentences = _sentences(source)
+    if not terms or not sentences:
+        return []
+
+    markers = (
+        " is a ", " is an ", " is the ", " refers to ",
+        " defined as ", " can be defined as ", " is known as ",
+        " is called ", " framework for ", " system for ",
+        " platform for ", " environment for ",
+    )
+
+    ranked = []
+    for sentence in sentences:
+        low = " " + sentence.lower() + " "
+        words = _words(sentence)
+        term_hits = len(terms & words)
+        if term_hits == 0:
+            continue
+        marker_hits = sum(1 for marker in markers if marker in low)
+        score = (term_hits * 2.0) + (marker_hits * 6.0)
+        if len(sentence) <= 240:
+            score += 1.0
+        ranked.append((score, sentence))
+
+    ranked.sort(key=lambda item: (-item[0], len(item[1])))
+
+    selected = []
+    seen = set()
+    for _, sentence in ranked:
+        key = re.sub(r"\W+", "", sentence.lower())
+        if not key or key in seen:
+            continue
+        selected.append(sentence)
+        seen.add(key)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _definition_focus_context(question: str, results: List[Dict[str, Any]]) -> str:
+    candidates = _definition_candidates(question, results)
+    if not candidates:
+        return ""
+    return (
+        "DEFINITION-FOCUSED COURSE EVIDENCE:\n"
+        "Use these sentences first when answering the definition.\n\n"
+        + "\n".join(f"- {sentence}" for sentence in candidates)
+    )
+
+
+# ============================================================
 # RAG CONTEXT
 # ============================================================
 
@@ -240,6 +289,9 @@ def detect_answer_format(question: str) -> str:
     ):
         return "definition"
 
+    if re.search(r"\b(?:example|examples|instance)\b", q):
+        return "example"
+
     if re.search(
         r"\b(advantages|disadvantages|limitations|merits|demerits)\b",
         q,
@@ -290,9 +342,36 @@ def _format_instruction(answer_format: str) -> str:
         return """
 Give a direct definition first.
 
-Then provide only the important explanation,
-properties, purpose, or example that is supported
-by the course material.
+For a question of the form "What is X?" or "Define X":
+- First identify the sentence in the course material that defines X.
+- Prefer explicit definitions such as "X is ...", "X refers to ...", or "X is a/an ...".
+- Do NOT answer with a related operation, component, process, example, implementation detail, or consequence merely because it mentions X.
+- If the material contains a direct definition, use that definition before secondary details.
+
+Then provide only the important explanation, properties, purpose, or example that is supported by the course material.
+"""
+
+    if answer_format == "example":
+        return """
+Start with a level-two heading containing the concept name, followed by a
+concise explanation supported by the course material. Then use this structure:
+
+## Course-Supported Example
+
+### Input
+[Copy the exact example input from the course material. If it is not
+available in the extracted text, state that explicitly.]
+
+### Output
+[Copy the exact output explicitly shown in the course material, preserving
+all code and formatting. Never execute, calculate, reconstruct, or guess an
+output. If it is not explicitly present, say it is not available in the
+extracted course material.]
+
+### Explanation of the Example
+[Explain only relationships and behavior supported by the course material.]
+
+Do not omit Input or Output. Do not put explanations in place of source output.
 """
 
     if answer_format == "comparison":
@@ -445,51 +524,30 @@ ANSWER FORMAT:
 # OLLAMA
 # ============================================================
 
-def _call_ollama(
+def _call_generator(
     question: str,
     context: str,
     answer_format: str,
     history: str = "",
     retry: bool = False,
 ) -> str:
-
     retry_instruction = ""
-
     if retry:
         retry_instruction = """
-Your previous attempt contained unsupported or insufficiently
-grounded information.
+CORRECTION REQUIRED:
+The previous draft did not pass the grounding checks.
+Remove unsupported claims and regenerate using ONLY the supplied course
+material. Do not add outside knowledge.
+""".strip()
 
-Generate the answer again.
-
-This time:
-- remove unsupported claims
-- remove invented details
-- use only explicit information from COURSE MATERIAL
-- keep the requested academic structure
-"""
-
-    payload = {
-        "model": OLLAMA_MODEL,
-
-        "messages": [
-            {
-                "role": "system",
-                "content": _system_prompt(answer_format),
-            },
-
-            {
-                "role": "user",
-                "content": f"""
+    user_prompt = f"""
 Student question:
 
 {question}
 
-
 Previous conversation:
 
 {history or "(none)"}
-
 
 COURSE MATERIAL:
 
@@ -499,56 +557,32 @@ COURSE MATERIAL:
 
 ----------------------------
 
-
 {retry_instruction}
 
-Now produce the final answer.
-""".strip(),
-            },
-        ],
+Now produce the final draft answer.
+""".strip()
 
-        "stream": False,
+    return generate_draft(
+        system_prompt=_system_prompt(answer_format),
+        user_prompt=user_prompt,
+    )
 
-        "think": False,
 
-        "options": {
-            "temperature": 0.0,
-            "top_p": 0.65,
-            "repeat_penalty": 1.10,
-            "num_ctx": NUM_CTX,
-            "num_predict": NUM_PREDICT,
-        },
-    }
-
-    try:
-
-        response = requests.post(
-            OLLAMA_URL,
-            json=payload,
-            timeout=OLLAMA_TIMEOUT,
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        message = data.get("message") or {}
-
-        answer = (
-            message.get("content")
-            or data.get("response")
-            or ""
-        )
-
-        return _clean_answer(answer)
-
-    except Exception as exc:
-
-        print(
-            f"[generator_short] Ollama error: {exc}"
-        )
-
-        return ""
+def _verify_answer(
+    question: str,
+    draft_answer: str,
+    context: str,
+    answer_format: str,
+    history: str = "",
+) -> str:
+    return verify_and_correct(
+        question=question,
+        draft_answer=draft_answer,
+        course_context=context,
+        answer_format=answer_format,
+        history=history,
+        long_answer=False,
+    )
 
 
 # ============================================================
@@ -675,6 +709,19 @@ def _grounding_score(
     return sum(scores) / len(scores)
 
 
+def _definition_structure_is_valid(answer: str) -> bool:
+    """Reject a related fact that does not actually define the term."""
+    if not _sentences(answer):
+        return False
+    markers = (
+        " is a ", " is an ", " is the ", " refers to ",
+        " defined as ", " can be defined as ", " is known as ",
+        " is called ",
+    )
+    text = " " + answer.lower() + " "
+    return any(marker in text for marker in markers)
+
+
 def _is_valid_answer(
     question: str,
     answer: str,
@@ -688,6 +735,10 @@ def _is_valid_answer(
 
     if _looks_like_meta(answer):
         return False
+
+    if detect_answer_format(question) == "definition":
+        if not _definition_structure_is_valid(answer):
+            return False
 
     source = _source_text(results)
 
@@ -721,54 +772,38 @@ def _fallback_answer(
 ) -> str:
 
     source = _source_text(results)
-
     if not source:
         return ""
 
+    answer_format = detect_answer_format(question)
+
+    # For definitions, never use ordinary word overlap because it can select
+    # a related fact instead of the actual definition.
+    if answer_format == "definition":
+        candidates = _definition_candidates(question, results, limit=3)
+        return candidates[0] if candidates else ""
+
     question_words = _words(question)
-
     sentences = _sentences(source)
-
     ranked = []
 
     for sentence in sentences:
-
         words = _words(sentence)
-
         if not words:
             continue
+        overlap = len(question_words & words)
+        ranked.append((overlap, sentence))
 
-        overlap = len(
-            question_words & words
-        )
-
-        ranked.append(
-            (overlap, sentence)
-        )
-
-    ranked.sort(
-        key=lambda x: x[0],
-        reverse=True,
-    )
-
+    ranked.sort(key=lambda x: x[0], reverse=True)
     selected = []
-
     for _, sentence in ranked:
-
         if sentence in selected:
             continue
-
         selected.append(sentence)
-
         if len(selected) >= 5:
             break
 
-    if not selected:
-        return ""
-
-    return "\n\n".join(
-        selected
-    )
+    return "\n\n".join(selected) if selected else ""
 
 
 # ============================================================
@@ -789,22 +824,23 @@ def generate_short_answer(
     if not results:
         return ""
 
-    context = build_short_context(
-        results
-    )
+    context = build_short_context(results)
 
     if not context:
         return ""
 
-    answer_format = detect_answer_format(
-        question
-    )
+    answer_format = detect_answer_format(question)
 
-    # -------------------------------
-    # Attempt 1
-    # -------------------------------
+    # For definitions, put explicit definition evidence first.
+    if answer_format == "definition":
+        focus = _definition_focus_context(question, results)
+        if focus:
+            context = focus + "\n\nGENERAL COURSE EVIDENCE:\n" + context
 
-    answer = _call_ollama(
+    # ------------------------------------------------------------
+    # Attempt 1: generator -> verifier
+    # ------------------------------------------------------------
+    draft = _call_generator(
         question=question,
         context=context,
         answer_format=answer_format,
@@ -812,23 +848,30 @@ def generate_short_answer(
         retry=False,
     )
 
-    if _is_valid_answer(
-        question,
-        answer,
-        results,
-    ):
-        return answer
-
-    print(
-        "[generator_short] "
-        "First answer rejected by grounding validator."
+    verified = _verify_answer(
+        question=question,
+        draft_answer=draft,
+        context=context,
+        answer_format=answer_format,
+        history=history,
     )
 
-    # -------------------------------
-    # Attempt 2
-    # -------------------------------
+    if _is_valid_answer(question, verified, results):
+        return verified
 
-    answer = _call_ollama(
+    # If the verifier is temporarily unavailable, a valid generator
+    # answer may still be used. It remains protected by the grounding gate.
+    if _is_valid_answer(question, draft, results):
+        return draft
+
+    print(
+        "[generator_short] First generator/verifier result rejected."
+    )
+
+    # ------------------------------------------------------------
+    # Attempt 2: corrected generator -> verifier
+    # ------------------------------------------------------------
+    draft = _call_generator(
         question=question,
         context=context,
         answer_format=answer_format,
@@ -836,16 +879,22 @@ def generate_short_answer(
         retry=True,
     )
 
-    if _is_valid_answer(
-        question,
-        answer,
-        results,
-    ):
-        return answer
+    verified = _verify_answer(
+        question=question,
+        draft_answer=draft,
+        context=context,
+        answer_format=answer_format,
+        history=history,
+    )
+
+    if _is_valid_answer(question, verified, results):
+        return verified
+
+    if _is_valid_answer(question, draft, results):
+        return draft
 
     print(
-        "[generator_short] "
-        "Second answer rejected. Using evidence fallback."
+        "[generator_short] Second result rejected. Using evidence fallback."
     )
 
     return _fallback_answer(

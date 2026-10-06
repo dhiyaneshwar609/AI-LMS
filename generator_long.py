@@ -5,7 +5,7 @@ AI-LMS Long Answer Generator
 Generic, course-material-grounded generator for long/detailed university
 questions.
 
-Uses local Ollama + Gemma 3 4B.
+Uses a hosted two-LLM generator + verifier.
 Answers are generated only from retrieved RAG evidence.
 
 The answer structure adapts to the student's wording rather than forcing one
@@ -17,20 +17,15 @@ and other detailed academic questions.
 from __future__ import annotations
 
 import re
-import requests
+import numpy as np
+from hosted_llm import generate_draft, verify_and_correct
+from rag_v2_search import _load_model
 from typing import Any, Dict, List
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
-
-OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
-OLLAMA_MODEL = "gemma3:4b"
-
-OLLAMA_TIMEOUT = 300
-NUM_CTX = 4096
-NUM_PREDICT = 900
 
 MAX_CONTEXT_CHARS = 10000
 
@@ -63,7 +58,7 @@ def _clean_text(text: str) -> str:
 
 def _clean_answer(text: str) -> str:
     """
-    Clean Gemma output while preserving academic and technical notation.
+    Clean Hosted model output while preserving academic and technical notation.
 
     In particular, repair control-character corruption that can occur in
     expressions such as dependent[k][i], then remove any remaining
@@ -407,6 +402,9 @@ def detect_answer_format(question: str) -> str:
     ):
         return "definition"
 
+    if re.search(r"\b(?:example|examples|instance)\b", q):
+        return "example"
+
     if re.search(
         r"\b(explain|describe|discuss|elaborate|illustrate)\b",
         q,
@@ -426,6 +424,27 @@ FORMAT:
 - Then add the important supported explanation, properties, roles, or example
   only when present in the course material.
 - Do not add unrelated sections just to make the answer longer.
+""",
+
+        "example": """
+FORMAT:
+Start with a level-two heading containing the concept name, followed by a
+concise explanation supported by the course material. Then use this structure:
+
+## Course-Supported Example
+
+### Input
+Copy the exact example input from the course material. If unavailable in the
+extracted text, state that explicitly.
+
+### Output
+Copy the exact output explicitly present in the course material, preserving
+code and formatting. Never execute, calculate, reconstruct, or guess output.
+If unavailable, state that it is not available in the extracted course
+material.
+
+### Explanation of the Example
+Explain only what the course evidence supports. Do not omit Input or Output.
 """,
 
         "list": """
@@ -819,7 +838,7 @@ Important:
 # OLLAMA CALL
 # ============================================================
 
-def _call_ollama(
+def _call_generator(
     question: str,
     context: str,
     answer_format: str = "general",
@@ -830,64 +849,48 @@ def _call_ollama(
     if not context:
         return ""
 
-    payload = {
-        "model": OLLAMA_MODEL,
+    extra = ""
 
-        "messages": [
-            {
-                "role": "system",
-                "content": BASE_SYSTEM_PROMPT,
-            },
+    if retry:
+        extra = """
+IMPORTANT CORRECTION:
+The previous draft did not pass the grounding checks.
+Remove unsupported claims and regenerate using ONLY the supplied course
+material. Do not add outside knowledge.
+""".strip()
 
-            {
-                "role": "user",
-                "content": _build_user_prompt(
-                    question,
-                    context,
-                    answer_format,
-                    retry=retry,
-                    history=history,
-                ),
-            },
-        ],
+    user_prompt = _build_user_prompt(
+        question=question,
+        context=context,
+        answer_format=answer_format,
+        retry=retry,
+        history=history,
+    )
 
-        "stream": False,
+    if extra:
+        user_prompt += "\n\n" + extra
 
-        "options": {
-            "temperature": 0.10,
-            "top_p": 0.70,
-            "repeat_penalty": 1.10,
-            "num_ctx": NUM_CTX,
-            "num_predict": NUM_PREDICT,
-        },
-    }
+    return generate_draft(
+        system_prompt=BASE_SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+    )
 
-    try:
 
-        response = requests.post(
-            OLLAMA_URL,
-            json=payload,
-            timeout=OLLAMA_TIMEOUT,
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        message = data.get(
-            "message",
-            {},
-        )
-
-        answer = message.get(
-            "content",
-            "",
-        )
-
-        return _clean_answer(answer)
-
-    except Exception:
-        return ""
+def _verify_answer(
+    question: str,
+    draft_answer: str,
+    context: str,
+    answer_format: str,
+    history: str = "",
+) -> str:
+    return verify_and_correct(
+        question=question,
+        draft_answer=draft_answer,
+        course_context=context,
+        answer_format=answer_format,
+        history=history,
+        long_answer=True,
+    )
 
 
 # ============================================================
@@ -1176,11 +1179,10 @@ def _source_sentences(results: List[Dict[str, Any]]) -> List[str]:
 
 def _source_grounding_score(answer: str, results: List[Dict[str, Any]]) -> float:
     """
-    Lexical evidence check.
+    Combine lexical overlap with semantic claim-to-evidence matching.
 
-    This is deliberately a safety gate, not a semantic truth proof. It prevents
-    a response that is mostly unrelated to the retrieved material from being
-    accepted, while allowing normal paraphrasing.
+    Semantic matching reuses the cached embedding model used by RAG retrieval.
+    It supplements, rather than replaces, lexical grounding.
     """
     answer_sentences = [
         s.strip()
@@ -1194,7 +1196,11 @@ def _source_grounding_score(answer: str, results: List[Dict[str, Any]]) -> float
     if not answer_sentences or not source_words:
         return 0.0
 
-    supported = 0
+    evidence_sentences = _source_sentences(results)
+    if not evidence_sentences:
+        return 0.0
+
+    lexical_support = []
     total = 0
 
     for sentence in answer_sentences:
@@ -1204,11 +1210,33 @@ def _source_grounding_score(answer: str, results: List[Dict[str, Any]]) -> float
         total += 1
 
         overlap = len(words & source_words) / max(1, len(words))
-        # Require a meaningful lexical connection, but allow paraphrases.
-        if overlap >= 0.30:
-            supported += 1
+        lexical_support.append(overlap >= 0.30)
 
-    return supported / max(1, total)
+    if not total:
+        return 0.0
+
+    try:
+        model = _load_model()
+        embeddings = model.encode(
+            answer_sentences + evidence_sentences,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        answer_embeddings = embeddings[:len(answer_sentences)]
+        evidence_embeddings = embeddings[len(answer_sentences):]
+        semantic_support = np.max(
+            answer_embeddings @ evidence_embeddings.T,
+            axis=1,
+        ) >= 0.42
+        supported = sum(
+            lexical or semantic
+            for lexical, semantic in zip(lexical_support, semantic_support)
+        )
+    except Exception:
+        supported = sum(lexical_support)
+
+    return supported / total
 
 
 def _has_unsupported_specifics(answer: str, results: List[Dict[str, Any]]) -> bool:
@@ -1312,22 +1340,17 @@ def generate_long_answer(
     if not results:
         return ""
 
-    context = build_long_context(
-        results
-    )
+    context = build_long_context(results)
 
     if not context:
         return ""
 
-    answer_format = detect_answer_format(
-        question
-    )
+    answer_format = detect_answer_format(question)
 
     # --------------------------------------------------------
-    # First generation
+    # Attempt 1: generator -> verifier
     # --------------------------------------------------------
-
-    answer = _call_ollama(
+    draft = _call_generator(
         question=question,
         context=context,
         answer_format=answer_format,
@@ -1335,21 +1358,36 @@ def generate_long_answer(
         history=history,
     )
 
+    verified = _verify_answer(
+        question=question,
+        draft_answer=draft,
+        context=context,
+        answer_format=answer_format,
+        history=history,
+    )
+
     if _is_usable_answer(
         question,
-        answer,
+        verified,
         answer_format,
         results,
     ):
-        return _clean_answer(
-            answer
-        )
+        return _clean_answer(verified)
+
+    # If the verifier is temporarily unavailable, keep the existing
+    # grounding/structure gate as a safe fallback for a valid draft.
+    if _is_usable_answer(
+        question,
+        draft,
+        answer_format,
+        results,
+    ):
+        return _clean_answer(draft)
 
     # --------------------------------------------------------
-    # Second generation / correction
+    # Attempt 2: corrected generator -> verifier
     # --------------------------------------------------------
-
-    retry_answer = _call_ollama(
+    retry_draft = _call_generator(
         question=question,
         context=context,
         answer_format=answer_format,
@@ -1357,20 +1395,31 @@ def generate_long_answer(
         history=history,
     )
 
+    retry_verified = _verify_answer(
+        question=question,
+        draft_answer=retry_draft,
+        context=context,
+        answer_format=answer_format,
+        history=history,
+    )
+
     if _is_usable_answer(
         question,
-        retry_answer,
+        retry_verified,
         answer_format,
         results,
     ):
-        return _clean_answer(
-            retry_answer
-        )
+        return _clean_answer(retry_verified)
 
-    # IMPORTANT:
-    #
-    # Do not return retrieved evidence as if it were the answer.
-    #
+    if _is_usable_answer(
+        question,
+        retry_draft,
+        answer_format,
+        results,
+    ):
+        return _clean_answer(retry_draft)
+
+    # Do not return raw retrieved evidence as if it were an answer.
     return ""
 
 

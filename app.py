@@ -162,12 +162,13 @@ def normalize_ai_result(raw):
     and older wrapped results.
     """
     if isinstance(raw, str):
-        return {"answer": raw, "sources": []}
+        return {"answer": raw, "sources": [], "diagram": None}
 
     if not isinstance(raw, dict):
         return {
             "answer": str(raw),
             "sources": [],
+            "diagram": None,
         }
 
     # Current/expected result.
@@ -175,6 +176,7 @@ def normalize_ai_result(raw):
         return {
             "answer": str(raw.get("answer", "")),
             "sources": raw.get("sources", []) or [],
+            "diagram": raw.get("diagram"),
         }
 
     # Older Streamlit wrapper:
@@ -191,6 +193,7 @@ def normalize_ai_result(raw):
             or "I could not generate an answer."
         ),
         "sources": raw.get("sources", []) or [],
+        "diagram": raw.get("diagram"),
     }
 
 
@@ -469,6 +472,7 @@ def create_ai_job(user_id, chat_id, question, history_text, attachment_text, lea
         "status": "running",
         "answer": "",
         "sources": [],
+        "diagram": None,
         "youtube": None,
         "learning_mode": bool(learning_mode),
         "user_id": str(user_id),
@@ -519,12 +523,14 @@ def read_finished_job(job):
         job["status"] = "done"
         job["answer"] = str(result.get("answer", ""))
         job["sources"] = result.get("sources", []) or []
+        job["diagram"] = result.get("diagram")
         job["youtube"] = result.get("youtube")
         job["learning_mode"] = bool(result.get("learning_mode", job.get("learning_mode", False)))
     else:
         job["status"] = "error"
         job["answer"] = result.get("answer", "I could not generate the answer. Please try again.")
         job["sources"] = result.get("sources", []) or []
+        job["diagram"] = result.get("diagram")
         job["detail"] = result.get("detail", "")
         job["youtube"] = None
     return True
@@ -992,7 +998,7 @@ def api_job(job_id):
         target = find_chat(chats, job["chat_id"])
         message_id = secrets.token_hex(5)
         if target is not None:
-            target.setdefault("messages", []).append({"id": message_id, "role": "assistant", "content": job.get("answer", ""), "sources": job.get("sources", []), "youtube": job.get("youtube"), "learning_mode": bool(job.get("learning_mode", False))})
+            target.setdefault("messages", []).append({"id": message_id, "role": "assistant", "content": job.get("answer", ""), "sources": job.get("sources", []), "diagram": job.get("diagram"), "youtube": job.get("youtube"), "learning_mode": bool(job.get("learning_mode", False))})
             save_chats(user["id"], chats)
         result = {k: v for k, v in job.items() if k not in {"process", "request_path", "result_path"}}
         result["message_id"] = message_id
@@ -1065,12 +1071,12 @@ def api_answer_pdf(chat_id):
     heading = ParagraphStyle("LMSHeading", parent=styles["Heading1"], fontSize=17, leading=22, alignment=TA_LEFT, spaceAfter=14)
     doc = SimpleDocTemplate(str(path), pagesize=A4, rightMargin=18*mm, leftMargin=18*mm, topMargin=18*mm, bottomMargin=18*mm)
     import html as _html
-    story = [Paragraph("AI-LMS Tutor", heading), Paragraph("Question", styles["Heading2"]), Paragraph(_html.escape(question or ""), normal), Paragraph("Answer", styles["Heading2"])]
+    story = [Paragraph("Lee AI Tutor", heading), Paragraph("Question", styles["Heading2"]), Paragraph(_html.escape(question or ""), normal), Paragraph("Answer", styles["Heading2"])]
     for part in answer.split("\n"):
         story.append(Paragraph(_html.escape(part) if part.strip() else "&nbsp;", normal))
     doc.build(story)
     from flask import send_file
-    return send_file(path, as_attachment=True, download_name="AI-LMS-Answer.pdf", mimetype="application/pdf")
+    return send_file(path, as_attachment=True, download_name="LeeLearn-Answer.pdf", mimetype="application/pdf")
 
 
 def run_ai_job(job_id, question, history_text, attachment_text):

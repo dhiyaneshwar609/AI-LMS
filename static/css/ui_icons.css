@@ -1,0 +1,173 @@
+.ui-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: middle;
+}
+
+.answer-actions button .ui-icon,
+.learning-mode-trigger .ui-icon,
+.question-actions .ui-icon,
+.youtube-play-mini .ui-icon {
+  width: 20px;
+  height: 20px;
+}
+
+.ui-icon-slot {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  align-items: center;
+  justify-content: center;
+  color: var(--icon-color, currentColor);
+}
+
+button,
+a.icon-btn {
+  transition: background-color .14s ease, color .14s ease, border-color .14s ease;
+}
+
+button:focus-visible,
+a.icon-btn:focus-visible {
+  outline: 2px solid var(--accent, #6c43e8);
+  outline-offset: 2px;
+}
+
+.icon-btn,
+.mobile-sidebar-close,
+.jump-latest,
+.chat-action,
+.folder-toggle,
+.composer-icon,
+.send-btn,
+.answer-actions button,
+.question-actions button,
+.youtube-close,
+.sources-close,
+.background-notification-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted, #667085);
+}
+
+.icon-btn:hover,
+.mobile-sidebar-close:hover,
+.jump-latest:hover,
+.chat-action:hover,
+.folder-toggle:hover,
+.composer-icon:hover,
+.send-btn:hover,
+.answer-actions button:hover,
+.question-actions button:hover,
+.youtube-close:hover,
+.sources-close:hover,
+.background-notification-close:hover {
+  border-radius: 9px;
+}
+
+.new-chat-btn,
+.new-folder-btn,
+.profile-menu button,
+.chat-menu button,
+.modal-actions button,
+.folder-choice,
+.question-edit-actions button,
+.youtube-search,
+.suggestion,
+.primary-btn,
+.secondary-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.new-chat-btn,
+.new-folder-btn,
+.profile-menu button,
+.chat-menu button,
+.modal-actions button,
+.folder-choice,
+.question-edit-actions button,
+.youtube-search,
+.primary-btn,
+.secondary-btn {
+  justify-content: flex-start;
+}
+
+.primary-btn,
+.secondary-btn {
+  justify-content: center;
+}
+
+.modal-actions button {
+  justify-content: center;
+}
+
+.ui-icon-label {
+  line-height: 1.2;
+}
+
+body.dark .ui-icon {
+  color: currentColor;
+}
+
+.search-box .ui-icon-slot,
+.welcome-icon .ui-icon-slot {
+  color: var(--muted, #667085);
+}
+
+.folder-icon {
+  color: var(--muted, #667085);
+}
+
+.youtube-play-mini {
+  color: var(--muted, #667085);
+  background: var(--surface-2, #f6f8fb);
+}
+
+.welcome-icon .ui-icon-slot,
+.welcome-icon .ui-icon {
+  width: 26px;
+  height: 26px;
+  flex-basis: 26px;
+}
+
+.suggestion .ui-icon {
+  width: 18px;
+  height: 18px;
+  flex-basis: 18px;
+  color: var(--muted, #667085);
+}
+
+.modal-icon .ui-icon {
+  width: 21px;
+  height: 21px;
+  flex-basis: 21px;
+}
+
+.send-icon .ui-icon,
+.stop-icon .ui-icon {
+  width: 20px;
+  height: 20px;
+}
+
+.send-btn .stop-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.youtube-search .ui-icon {
+  width: 18px;
+  height: 18px;
+  flex-basis: 18px;
+}

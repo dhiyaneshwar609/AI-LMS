@@ -293,68 +293,61 @@ def _question_topic(question: str) -> str:
 # ============================================================
 
 def _question_intent(question: str) -> str:
+    q = _clean_space(question).lower()
 
-    q = str(
-        question or ""
-    ).lower()
+    if re.search(
+        r"\b(?:compare|comparison|differences?|differentiate|distinguish|"
+        r"contrast|versus|vs\.?)\b",
+        q,
+    ):
+        return "comparison"
 
+    if re.search(
+        r"\b(?:advantages?|disadvantages?|limitations?|benefits?|"
+        r"merits|demerits|pros and cons)\b",
+        q,
+    ):
+        return "advantages"
+
+    if re.search(r"\b(?:algorithm|pseudocode)\b", q):
+        return "algorithm"
+
+    if re.search(
+        r"\b(?:architecture|components?|system design)\b",
+        q,
+    ):
+        return "architecture"
+
+    if re.search(
+        r"\b(?:list|enumerate|name|mention|classify|classification|"
+        r"types? of|categories of)\b",
+        q,
+    ):
+        return "list"
+
+    if re.search(r"\b(?:example|examples|instance)\b", q):
+        return "example"
+
+    if re.search(
+        r"\b(?:how|working|steps?|procedure|process|workflow)\b",
+        q,
+    ):
+        return "how"
+
+    if re.search(r"\b(?:why|reason|purpose)\b", q):
+        return "why"
 
     if re.search(
         r"\b(?:what\s+(?:is|are)|define|definition\s+of|meaning\s+of)\b",
         q,
     ):
-
         return "definition"
 
-
     if re.search(
-        r"\b(?:compare|comparison|difference|differentiate|distinguish)\b",
+        r"\b(?:explain|describe|discuss|elaborate|illustrate)\b",
         q,
     ):
-
-        return "comparison"
-
-
-    if re.search(
-        r"\b(?:why|reason|purpose)\b",
-        q,
-    ):
-
-        return "why"
-
-
-    if re.search(
-        r"\b(?:how|working|steps?|procedure|process|algorithm)\b",
-        q,
-    ):
-
-        return "how"
-
-
-    # Explanation requests are different from definition requests.
-    if re.search(
-        r"(?:explain|describe|discuss|elaborate|illustrate)",
-        q,
-    ):
-
         return "explanation"
-
-
-    if re.search(
-        r"\b(?:advantages?|disadvantages?|limitations?|benefits?)\b",
-        q,
-    ):
-
-        return "advantages"
-
-
-    if re.search(
-        r"\b(?:example|examples|instance)\b",
-        q,
-    ):
-
-        return "example"
-
 
     return "general"
 
@@ -364,13 +357,37 @@ def _question_intent(question: str) -> str:
 # ============================================================
 
 def _split_sentences(text: str) -> List[str]:
+    """
+    Split real sentences without treating PDF line-wrapping as a
+    sentence boundary.
 
-    text = str(
-        text or ""
-    ).replace(
-        "\r",
-        "\n"
+    Many course PDFs contain line breaks in the middle of a sentence,
+    for example:
+
+        Hadoop is a software framework for writing distributed
+        applications.
+
+    The old splitter treated those two PDF lines as two separate
+    sentences and could return only the first fragment.  We preserve
+    genuine bullet/list boundaries, but join ordinary wrapped lines.
+    """
+
+    text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+    # Preserve common bullet/list boundaries before joining PDF
+    # line-wrapped text.
+    bullet_break = re.compile(
+        r"\n(?=\s*(?:[•*¢©]|e\s+|[-–]\s+|\d+(?:\.\d+)*\s+))",
+        flags=re.IGNORECASE,
     )
+
+    text = bullet_break.sub("<<SENTENCE_BREAK>>", text)
+
+    # A newline in the middle of a PDF sentence is only formatting.
+    text = re.sub(r"\s*\n\s*", " ", text)
+
+    # Restore list boundaries as a real separator.
+    text = text.replace("<<SENTENCE_BREAK>>", "\n")
 
     pieces = re.split(
         r"(?<=[.!?])\s+|\n+",
@@ -380,15 +397,9 @@ def _split_sentences(text: str) -> List[str]:
     result = []
 
     for piece in pieces:
-
-        piece = _clean_space(
-            piece
-        )
-
+        piece = _clean_space(piece)
         if piece:
-            result.append(
-                piece
-            )
+            result.append(piece)
 
     return result
 
@@ -1149,13 +1160,10 @@ class QueryUnderstandingAgent:
         # ----------------------------------------------------
         # Answer size
         # ----------------------------------------------------
-        # What is / Define -> short
-        # Explain / Describe / Discuss -> medium
-        # Explain in detail / marks request -> detailed
-
         if re.search(
-            r"\b(?:10|13|15|16)\s*marks?\b|"
-            r"\b(?:in\s+detail|in\s+depth|detailed|deeply|elaborate)\b",
+            r"\b(?:8|10|12|13|15|16)\s*[- ]?marks?\b|"
+            r"\b(?:in\s+detail|in\s+depth|detailed|deeply|elaborate|"
+            r"long\s+answer)\b",
             q,
         ):
 
@@ -1164,12 +1172,21 @@ class QueryUnderstandingAgent:
             retry_k = 18
 
         elif re.search(
-            r"\b(?:5)\s*marks?\b",
+            r"\b(?:2)\s*[- ]?marks?\b|\b(?:short\s+answer|briefly)\b",
             q,
-        ) or intent in {
+        ):
+
+            answer_type = "short"
+            retrieval_k = 10
+            retry_k = 16
+
+        elif re.search(r"\b5\s*[- ]?marks?\b", q) or intent in {
             "explanation",
             "comparison",
             "how",
+            "algorithm",
+            "architecture",
+            "list",
             "advantages",
             "why",
             "example",
@@ -1206,28 +1223,14 @@ class QueryUnderstandingAgent:
         )
 
 
-        if topic:
+        if topic and _question_intent(question) == "definition":
+            return f"{topic} definition"
 
-            return (
-                f"{topic} definition explanation"
-            )
-
-
-        cleaned = _words(
-            question
-        )
-
-
+        cleaned = _words(question)
         if cleaned:
+            return " ".join(cleaned)
 
-            return " ".join(
-                cleaned
-            )
-
-
-        return _clean_space(
-            question
-        )
+        return _clean_space(question)
 
 
 # ============================================================
@@ -1237,7 +1240,6 @@ class QueryUnderstandingAgent:
 class CourseDetectionAgent:
 
     name = "Course Detection Agent"
-
 
     def run(
         self,
@@ -1649,11 +1651,33 @@ class RerankingAgent:
                     score += 0.08
 
 
-            elif intent == "how":
+            elif intent in {"how", "algorithm"}:
 
                 if re.search(
                     r"\b(?:step|process|procedure|"
                     r"working|algorithm|phase)\b",
+                    text_lower,
+                ):
+
+                    score += 0.06
+
+
+            elif intent == "architecture":
+
+                if re.search(
+                    r"\b(?:component|role|relationship|architecture|"
+                    r"structure|layer|module)\b",
+                    text_lower,
+                ):
+
+                    score += 0.06
+
+
+            elif intent == "list":
+
+                if re.search(
+                    r"\b(?:types?|categories|classification|include|"
+                    r"following|consists of)\b",
                     text_lower,
                 ):
 
@@ -1938,9 +1962,9 @@ class ValidationAgent:
 def _diagram_requested(question: str) -> bool:
     q = _clean_space(question).lower()
     return bool(re.search(
-        r"\b(?:diagram|flowchart|flow chart|architecture|block diagram|"
-        r"sequence diagram|workflow|work flow|draw|illustrate|"
-        r"graphical representation|visualize|visual explanation)\b",
+        r"\b(?:diagram|flowchart|flow chart|architecture diagram|block diagram|"
+        r"sequence diagram|draw|sketch|illustrate a diagram|"
+        r"graphical representation|visualize|visualise)\b",
         q,
         flags=re.IGNORECASE,
     ))
@@ -1972,7 +1996,7 @@ def _unique_preserve(values: List[str]) -> List[str]:
 
 
 class GroundedDiagramAgent:
-    """Build a conservative Mermaid diagram only from retrieved evidence."""
+    """Build a Mermaid diagram only from relationships stated in retrieved evidence."""
 
     name = "Grounded Diagram Agent"
 
@@ -1987,6 +2011,113 @@ class GroundedDiagramAgent:
         (r"(?P<a>[A-Za-z][A-Za-z0-9 /_-]{1,60})\s+(?:processed|handled)\s+by\s+(?P<b>[A-Za-z][A-Za-z0-9 /_-]{1,60})", "processed by"),
     )
 
+    _ENUMERATED_LAYER = re.compile(
+        r"\((?P<ordinal>iv|iii|ii|i|[1-9]\d*)[)}]\s*"
+        r"(?P<label>[^.;\n]{1,140}?\blayer\b)",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _layer_label(raw_label: str, evidence_text: str) -> str:
+        label = re.sub(r"\blayer\b.*$", "", raw_label, flags=re.IGNORECASE)
+        label = re.sub(r"^\s*(?:APIs?|interfaces?)\s+at\s+", "", label, flags=re.IGNORECASE)
+        label = _clean_space(label).strip(" ,:-")
+        low = label.lower()
+        evidence = evidence_text.lower()
+
+        if "application" in low and "support" in low:
+            return "Application Support Layer"
+        if "processing" in low and "framework" in low:
+            component = " - MapReduce" if re.search(r"\bmapreduce\b", evidence) else ""
+            return f"Processing Framework{component} Layer"
+        if "resource" in low and "manager" in low:
+            component = " - YARN" if re.search(r"\byarn\b", evidence) else ""
+            return f"Resource Manager{component} Layer"
+        if "distributed" in low and "storage" in low:
+            component = " - HDFS" if re.search(r"\bhdfs\b", evidence) else ""
+            return f"Distributed Storage{component} Layer"
+
+        return _diagram_label(f"{label.title()} Layer", max_words=8)
+
+    def _derived_layer_diagram(
+        self,
+        evidence_results: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        evidence_text = "\n".join(_text(result) for result in evidence_results)
+        layer_list = re.search(
+            r"\b(?P<count>three|four|five|six|3|4|5|6)\s+layers?\b"
+            r"[\s\S]{0,100}?\bas follows\b(?P<items>[\s\S]{0,700})",
+            evidence_text,
+            re.IGNORECASE,
+        )
+        if not layer_list:
+            return None
+
+        listed_text = layer_list.group("items")
+        expected_count = {
+            "three": 3, "3": 3, "four": 4, "4": 4,
+            "five": 5, "5": 5, "six": 6, "6": 6,
+        }[layer_list.group("count").lower()]
+        ordered_layers = []
+        for match in self._ENUMERATED_LAYER.finditer(listed_text):
+            label = self._layer_label(match.group("label"), evidence_text)
+            if label and label.lower() not in {value.lower() for value in ordered_layers}:
+                ordered_layers.append(label)
+            if len(ordered_layers) >= expected_count:
+                break
+
+        if len(ordered_layers) < 3 or len(ordered_layers) != expected_count:
+            return None
+
+        top_down_layers = list(reversed(ordered_layers))
+        has_client_application_relation = bool(re.search(
+            r"\bclient\b.{0,100}\bhosts?\b.{0,100}\bapplications?\b",
+            evidence_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        ))
+        nodes = []
+        if has_client_application_relation:
+            nodes.append("Client")
+        nodes.extend(top_down_layers)
+
+        edges = [
+            {"from": source, "to": target, "relation": "listed architecture layer order"}
+            for source, target in zip(nodes, nodes[1:])
+        ]
+
+        node_ids = {node: f"N{index}" for index, node in enumerate(nodes, 1)}
+        lines = ["flowchart TD"]
+        for node in nodes:
+            lines.append(f'    {node_ids[node]}["{node}"]')
+        for edge in edges:
+            lines.append(f"    {node_ids[edge['from']]} --> {node_ids[edge['to']]}")
+
+        cross_layer_notes = []
+        if re.search(r"\bAVRO\b.{0,100}\bserialization\b.{0,100}\blayers?\b", evidence_text, re.IGNORECASE | re.DOTALL):
+            cross_layer_notes.append("AVRO: data serialization between layers")
+        if re.search(r"\bZookeeper\b.{0,100}\bcoordination\b.{0,100}\blayer components\b", evidence_text, re.IGNORECASE | re.DOTALL):
+            cross_layer_notes.append("Zookeeper: coordination among layer components")
+        if cross_layer_notes:
+            lines.append('    subgraph CrossLayer["Cross-layer functions"]')
+            for index, note in enumerate(cross_layer_notes, len(nodes) + 1):
+                note_id = f"N{index}"
+                nodes.append(note)
+                lines.append(f'        {note_id}["{note}"]')
+            lines.append("    end")
+
+        return {
+            "requested": True,
+            "grounded": True,
+            "derived": True,
+            "label": "Diagram derived from the course material",
+            "type": "derived_flowchart",
+            "mermaid": "\n".join(lines),
+            "nodes": nodes,
+            "edges": edges,
+            "evidence_count": len(evidence_results),
+            "reason": "The layer sequence and relationships were derived only from retrieved course evidence.",
+        }
+
     def run(self, question: str, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not _diagram_requested(question):
             return {"requested": False, "grounded": False, "type": None,
@@ -1994,6 +2125,10 @@ class GroundedDiagramAgent:
                     "evidence_count": 0, "reason": "No diagram was requested."}
 
         evidence_results = [r for r in results if _evidence_type(r) == "primary"] or list(results)
+        derived_layer_diagram = self._derived_layer_diagram(evidence_results)
+        if derived_layer_diagram:
+            return derived_layer_diagram
+
         edges = []
         nodes = []
         seen_edges = set()
@@ -2045,10 +2180,65 @@ class GroundedDiagramAgent:
                 relation = edge["relation"].replace("|", "/")
                 lines.append(f"    {a_id} -->|{relation}| {b_id}")
 
-        return {"requested": True, "grounded": True, "type": "flowchart",
+        return {"requested": True, "grounded": True, "derived": True,
+            "label": "Diagram derived from the course material", "type": "derived_flowchart",
                 "mermaid": "\n".join(lines), "nodes": nodes, "edges": edges,
                 "evidence_count": len(evidence_results),
-                "reason": "Diagram relationships were extracted from retrieved course evidence."}
+            "reason": "Diagram relationships were derived only from retrieved course evidence."}
+
+
+def _diagram_grounded_summary(question: str, diagram: Dict[str, Any]) -> str:
+    title = _clean_space(question)
+    title = re.sub(
+        r"^\s*(?:please\s+)?(?:draw|show|create|sketch|illustrate)\s+"
+        r"(?:(?:and|to)\s+)?(?:explain\s+)?",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(
+        r"^\s*(?:a|an|the)\s+(?:diagram|flowchart|figure)\s+(?:of\s+)?",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(r"\s+(?:diagram|flowchart|figure)\s*$", "", title, flags=re.IGNORECASE)
+    title = title.strip(" .?!").title() or "Architecture"
+
+    nodes = [str(node) for node in diagram.get("nodes", [])]
+    layers = [node for node in nodes if re.search(r"\blayer\b$", node, re.IGNORECASE)]
+    facts = []
+
+    if layers:
+        facts.append(
+            "The course material describes these layers: "
+            + ", ".join(layers)
+            + "."
+        )
+
+    if any(
+        edge.get("from") == "Client"
+        and "Application Support Layer" in str(edge.get("to", ""))
+        for edge in diagram.get("edges", [])
+    ):
+        facts.append("The Client hosts applications using Hadoop ecosystem projects.")
+
+    for node in nodes:
+        if node.startswith("AVRO:"):
+            facts.append("AVRO enables " + node.partition(":")[2].strip() + ".")
+        elif node.startswith("Zookeeper:"):
+            facts.append("Zookeeper enables " + node.partition(":")[2].strip() + ".")
+
+    if not facts:
+        for edge in diagram.get("edges", []):
+            relation = edge.get("relation")
+            if relation and relation != "listed architecture layer order":
+                facts.append(f"{edge['from']} {relation} {edge['to']}.")
+
+    if not facts:
+        return ""
+
+    return f"### {title}\n\n" + "\n\n".join(facts)
 
 
 # ============================================================
@@ -2068,40 +2258,53 @@ class AnswerPlanner:
         plan = []
 
         if intent == "definition":
-            plan = ["definition"]
-            if answer_type in {"medium", "detailed"}:
-                plan += ["key_points", "example"]
+            plan = ["concise_definition_first", "relevant_key_points"]
+            if re.search(r"\b(?:example|examples|illustrate)\b", q):
+                plan.append("course_supported_example")
         elif intent == "comparison":
-            plan = ["introduction", "comparison_table", "key_difference"]
+            plan = ["direct_introduction", "comparison_table_when_appropriate", "key_differences"]
+        elif intent == "algorithm":
+            plan = ["purpose_or_concept", "ordered_steps", "pseudocode_or_flow_when_supported"]
+        elif intent == "architecture":
+            plan = ["components", "roles", "relationships", "diagram_only_when_supported"]
+        elif intent == "list":
+            plan = ["direct_numbered_or_bulleted_list", "brief_explanations_when_supported"]
         elif intent == "how":
-            plan = ["brief_introduction", "steps", "working_or_flow"]
-            if answer_type in {"medium", "detailed"}:
-                plan += ["example"]
+            plan = ["brief_introduction", "steps_in_correct_sequence", "working_or_flow_when_supported"]
         elif intent == "explanation":
-            plan = ["introduction", "core_explanation", "key_points"]
+            plan = ["introduction", "structured_explanation", "relevant_details"]
             if answer_type == "detailed":
-                plan += ["working_or_flow", "example", "conclusion"]
+                plan.append("conclusion")
         elif intent == "why":
             plan = ["direct_reason", "explanation"]
-            if answer_type in {"medium", "detailed"}:
-                plan += ["example"]
         elif intent == "advantages":
-            plan = ["brief_introduction", "advantages", "limitations"]
+            asks_advantages = bool(re.search(r"\b(?:advantages?|benefits?|merits|pros)\b", q))
+            asks_disadvantages = bool(re.search(r"\b(?:disadvantages?|limitations?|demerits|cons)\b", q))
+            requested_points = []
+            if asks_advantages or not asks_disadvantages:
+                requested_points.append("advantages")
+            if asks_disadvantages:
+                requested_points.append("disadvantages_or_limitations")
+            plan = ["brief_introduction", *requested_points, "clear_numbered_or_bulleted_points"]
         elif intent == "example":
-            plan = ["concept", "example", "explanation"]
+            plan = [
+                "concept",
+                "course_supported_example",
+                "example_input_from_evidence",
+                "example_output_exactly_from_evidence_or_unavailable",
+                "explain_the_example_from_evidence",
+            ]
         else:
-            plan = ["direct_answer", "explanation"]
-            if answer_type in {"medium", "detailed"}:
-                plan += ["key_points"]
+            plan = ["direct_answer", "structured_relevant_explanation"]
 
-        # Explicit academic/exam requests override the default compact structure.
-        if re.search(r"\b(?:5|10|13|15|16)\s*marks?\b|\b(?:exam|university|long answer)\b", q):
-            plan = ["introduction", *plan]
-            if "conclusion" not in plan:
-                plan.append("conclusion")
+        if answer_type == "short":
+            depth_instruction = "concise_exam_oriented_response"
+        elif answer_type == "detailed":
+            depth_instruction = "complete_structured_exam_answer"
+        else:
+            depth_instruction = "moderately_detailed_response"
 
-        # Ask for a diagram/flow only when the question itself calls for it.
-        if re.search(r"\b(?:diagram|flowchart|architecture|block diagram)\b", q):
+        if re.search(r"\b(?:diagram|flowchart|block diagram|draw)\b", q):
             plan.append("grounded_diagram")
 
         # Remove duplicates while preserving order.
@@ -2111,6 +2314,7 @@ class AnswerPlanner:
             "intent": intent,
             "topic": topic,
             "answer_type": answer_type,
+            "response_depth": depth_instruction,
             "plan": plan,
             "evidence_priority": ["primary", "supporting_context"],
         }
@@ -2166,6 +2370,18 @@ class AdaptiveLearningAgent:
         elif intent == "how":
             teaching_mode = "process_focused"
             explanation_level = "normal"
+        elif intent == "algorithm":
+            teaching_mode = "algorithm_focused"
+            explanation_level = "normal"
+        elif intent == "architecture":
+            teaching_mode = "architecture_focused"
+            explanation_level = "normal"
+        elif intent == "list":
+            teaching_mode = "list_focused"
+            explanation_level = "normal"
+        elif intent == "advantages":
+            teaching_mode = "points_focused"
+            explanation_level = "normal"
         elif intent == "comparison":
             teaching_mode = "comparison_focused"
             explanation_level = "normal"
@@ -2215,11 +2431,21 @@ class AdaptiveLearningAgent:
         mode_rules = {
             "simplify": "Explain the same concept more simply. Prefer short sentences and intuitive wording. Do not remove important course facts.",
             "deep_explanation": "Give a deeper explanation using the retrieved course evidence. Explain relationships and working clearly without adding outside facts.",
-            "example_focused": "Focus on a concrete example only when the retrieved evidence supports it. Explain how the example maps to the concept.",
+            "example_focused": (
+                "Use the retrieved evidence to identify the example input and output. "
+                "Copy any explicit source output exactly; never calculate or infer a "
+                "missing output. If no explicit output is present, state that it is "
+                "not available in the extracted course material. Explain only what "
+                "the evidence supports."
+            ),
             "visual_explanation": "Use the grounded diagram supplied by the tutor when available. Do not invent components or relationships. If no grounded diagram is available, explain the concept in text instead of inventing a visual structure.",
             "exam_focused": "Write an academically structured answer suitable for the requested marks. Cover the planned sections using only supported evidence.",
             "reason_focused": "Answer the reason directly first, then explain why using the retrieved evidence.",
             "process_focused": "Explain the process or working in a clear sequence. Do not invent steps that are absent from the evidence.",
+            "algorithm_focused": "Explain the algorithm's purpose, then its supported steps in order. Include pseudocode or flow only when the course evidence supports it.",
+            "architecture_focused": "Describe supported components, their roles, and relationships. Include a diagram only when the evidence supports it.",
+            "list_focused": "Answer with a direct numbered or bulleted list. Explain items only to the extent supported by the course evidence.",
+            "points_focused": "Present only the requested advantages or disadvantages as clear numbered or bulleted points, using course evidence.",
             "comparison_focused": "Compare the requested concepts using only evidence-supported attributes. A Markdown table is appropriate when useful.",
             "continue_concept": "Continue teaching the current concept from the conversation. Address exactly the student's follow-up instead of restarting unnecessarily.",
             "guided_explanation": "Give a clear, moderately detailed explanation with the most useful key points.",
@@ -2270,20 +2496,6 @@ class AnswerAgent:
         # ----------------------------------------------------
 
         if intent == "definition":
-
-            direct_definition = (
-                _best_direct_definition(
-                    question,
-                    results,
-                )
-            )
-
-
-            if direct_definition:
-
-                return direct_definition
-
-
             answer_results = (
                 _definition_focused_results(
                     question,
@@ -2315,24 +2527,23 @@ class AnswerAgent:
                 plan_text = (
                     "\n\nANSWER STRUCTURE (follow only when supported by the evidence): "
                     + " -> ".join(answer_plan.get("plan", []))
+                    + f"\nResponse depth: {answer_plan.get('response_depth', 'moderately_detailed_response')}. "
                     + "\nEvidence priority: primary evidence first; supporting context only when relevant. "
-                    "Do not introduce facts that are absent from the retrieved evidence."
+                    "Do not introduce facts that are absent from the retrieved evidence. "
+                    "Synthesize a tutor response; do not return a retrieved sentence verbatim by itself."
                 )
 
             planned_history = f"{history}{plan_text}" if plan_text else history
-
-            if answer_type == "short":
-                answer = generate_short_answer(
-                    question,
-                    answer_results,
-                    history=planned_history,
-                )
-            else:
-                answer = generate_long_answer(
-                    question,
-                    answer_results,
-                    history=planned_history,
-                )
+            answer_generator = (
+                generate_short_answer
+                if answer_type == "short"
+                else generate_long_answer
+            )
+            answer = answer_generator(
+                question,
+                answer_results,
+                history=planned_history,
+            )
 
         except Exception:
             return (
@@ -2344,6 +2555,40 @@ class AnswerAgent:
         answer = str(
             answer or ""
         ).strip()
+
+        def is_raw_evidence_sentence(candidate: str) -> bool:
+            candidate_key = re.sub(r"\W+", "", _clean_space(candidate).lower())
+            return bool(candidate_key) and any(
+                candidate_key
+                == re.sub(r"\W+", "", _clean_space(sentence).lower())
+                for result in answer_results
+                for sentence in _split_sentences(_text(result))
+            )
+
+        if answer and is_raw_evidence_sentence(answer):
+            revision_history = (
+                f"{planned_history}\n\n"
+                "REVISION REQUIRED: Your previous output copied one course sentence verbatim. "
+                "Rewrite it as a concise, clear tutor explanation using only the same evidence. "
+                "Add only relevant supported points, and do not quote or copy the sentence."
+            )
+            try:
+                answer = str(
+                    answer_generator(
+                        question,
+                        answer_results,
+                        history=revision_history,
+                    )
+                    or ""
+                ).strip()
+            except Exception:
+                answer = ""
+
+            if answer and is_raw_evidence_sentence(answer):
+                return (
+                    "I could not generate a sufficiently synthesized answer "
+                    "from the uploaded course material."
+                )
 
 
         if not answer:
@@ -2368,8 +2613,265 @@ class AnswerAgent:
             ""
         ).strip()
 
-
         return answer
+
+
+def _example_io_from_results(
+    results: List[Dict[str, Any]],
+    question: str = "",
+) -> Tuple[str, str]:
+    """Extract only source-explicit example input and printed output."""
+    query_terms = {
+        word.lower()
+        for word in re.findall(r"[A-Za-z]{4,}", question)
+        if word.lower() not in {
+            "with", "from", "that", "this", "what", "when", "where",
+            "which", "about", "explain", "example", "examples",
+        }
+    }
+    candidates = []
+
+    def resolve_literal_input(input_lines: List[str]) -> str:
+        if not input_lines:
+            return ""
+
+        assignment = re.match(
+            r"^\s*([A-Za-z_]\w*)\s*=\s*(.+)$",
+            input_lines[-1],
+        )
+        if not assignment:
+            return "\n".join(input_lines).strip()
+
+        rhs = assignment.group(2)
+        referenced_names = re.findall(r"\b[A-Za-z_]\w*\b", rhs)
+        attribute_names = set(re.findall(r"\.([A-Za-z_]\w*)", rhs))
+        for name in referenced_names:
+            if name in attribute_names:
+                continue
+            for result in results:
+                for line in _text(result).splitlines():
+                    source_assignment = re.match(
+                        rf"^\s*{re.escape(name)}\s*=\s*(.+)$",
+                        line,
+                    )
+                    if source_assignment and re.match(
+                        r"""(?:['"`].*['"`]|[-+]?\d|True\b|False\b|None\b|[\[{])""",
+                        source_assignment.group(1).strip(),
+                    ):
+                        return line.strip()
+
+        return "\n".join(input_lines).strip()
+
+    labeled_input = ""
+    for result in results:
+        text = _text(result)
+        lines = text.splitlines()
+
+        for index, line in enumerate(lines):
+            output_label = re.match(r"^\s*output\s*:\s*(.*)$", line, re.IGNORECASE)
+            input_label = re.match(r"^\s*input\s*:\s*(.*)$", line, re.IGNORECASE)
+            if output_label:
+                output = output_label.group(1).strip()
+                if not output and index + 1 < len(lines):
+                    output = lines[index + 1].strip()
+                if output:
+                    input_text = ""
+                    for prior in range(index - 1, -1, -1):
+                        match = re.match(r"^\s*input\s*:\s*(.*)$", lines[prior], re.IGNORECASE)
+                        if match:
+                            input_text = match.group(1).strip()
+                            if not input_text and prior + 1 < index:
+                                input_text = lines[prior + 1].strip()
+                            break
+                    return input_text or labeled_input, output
+
+            if input_label:
+                input_text = input_label.group(1).strip()
+                if not input_text and index + 1 < len(lines):
+                    input_text = lines[index + 1].strip()
+                labeled_input = input_text
+                for following in range(index + 1, len(lines)):
+                    output_match = re.match(
+                        r"^\s*output\s*:\s*(.*)$",
+                        lines[following],
+                        re.IGNORECASE,
+                    )
+                    if output_match:
+                        output = output_match.group(1).strip()
+                        if not output and following + 1 < len(lines):
+                            output = lines[following + 1].strip()
+                        if output:
+                            return input_text, output
+                    if re.match(r"^\s*input\s*:", lines[following], re.IGNORECASE):
+                        break
+
+        print_lines = [
+            index for index, line in enumerate(lines)
+            if re.search(r"\bprint\s*\(", line)
+        ]
+        if not print_lines:
+            continue
+
+        input_lines = []
+        for index in range(print_lines[0] - 1, -1, -1):
+            candidate = lines[index].strip()
+            if not candidate:
+                if input_lines:
+                    break
+                continue
+            if re.match(
+                r"^(?:import|from|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*=|"
+                r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\()",
+                candidate,
+            ):
+                input_lines.insert(0, lines[index].rstrip())
+                continue
+            if input_lines:
+                break
+
+        output_lines = []
+        for index in print_lines:
+            following = index + 1
+            while following < len(lines) and not lines[following].strip():
+                following += 1
+            if following >= len(lines):
+                continue
+
+            candidate = lines[following].rstrip()
+            if not re.match(
+                r"^(?:[\[{'\"(]|[-+]?\d|True\b|False\b|None\b|"
+                r"tensor\s*\(|torch\.Size\s*\(|Traceback\b|"
+                r"(?:Value|Type|Index|Key|Name|"
+                r"Attribute|Runtime)Error\b)",
+                candidate.strip(),
+                re.IGNORECASE,
+            ):
+                continue
+
+            output_lines.append(candidate)
+            opening = sum(candidate.count(char) for char in "[{(")
+            closing = sum(candidate.count(char) for char in "]})")
+            cursor = following + 1
+            while opening > closing and cursor < len(lines):
+                continuation = lines[cursor].rstrip()
+                output_lines.append(continuation)
+                opening += sum(continuation.count(char) for char in "[{(")
+                closing += sum(continuation.count(char) for char in "]})")
+                cursor += 1
+
+        if output_lines:
+            context_start = max(0, print_lines[0] - 6)
+            context_end = min(
+                len(lines),
+                print_lines[-1] + len(output_lines) + 2,
+            )
+            context = " ".join(lines[context_start:context_end]).lower()
+            score = sum(
+                2 if term in context else 1
+                for term in query_terms
+                if term in context
+                or (len(term) >= 6 and term[:6] in context)
+            )
+            if query_terms and score < 2:
+                continue
+            candidates.append((
+                score,
+                "\n".join(input_lines).strip(),
+                "\n".join(output_lines).strip(),
+            ))
+
+    if not candidates:
+        return labeled_input, ""
+
+    _, input_text, output_text = max(
+        candidates,
+        key=lambda candidate: candidate[0],
+    )
+    input_text = resolve_literal_input(input_text.splitlines())
+    return input_text, output_text
+
+
+def _enforce_example_io(
+    answer: str,
+    results: List[Dict[str, Any]],
+    question: str = "",
+) -> str:
+    input_text, output_text = _example_io_from_results(results, question)
+    if input_text:
+        input_content = f"```text\n{input_text}\n```"
+    else:
+        input_content = (
+            "The course material provides the example, but the exact input "
+            "is not available in the extracted text."
+        )
+
+    if output_text:
+        output_content = f"```text\n{output_text}\n```"
+    else:
+        output_content = (
+            "The course material provides the example, but the exact "
+            "output is not available in the extracted text."
+        )
+
+    if not re.search(r"(?im)^##\s+Course-Supported Example\s*$", answer):
+        answer = answer.rstrip() + "\n\n## Course-Supported Example\n"
+
+    example_headings = list(re.finditer(
+        r"(?im)^##\s+Course-Supported Example\s*$",
+        answer,
+    ))
+    for duplicate in reversed(example_headings[1:]):
+        following_section = re.search(
+            r"(?m)^##\s+",
+            answer[duplicate.end():],
+        )
+        duplicate_end = (
+            duplicate.end() + following_section.start()
+            if following_section
+            else len(answer)
+        )
+        answer = answer[:duplicate.start()] + answer[duplicate_end:]
+
+    section = re.search(
+        r"(?im)^##\s+Course-Supported Example\s*$",
+        answer,
+    )
+    if not section:
+        return answer.strip()
+    next_section = re.search(r"(?m)^##\s+", answer[section.end():])
+    section_end = (
+        section.end() + next_section.start()
+        if next_section
+        else len(answer)
+    )
+    section_body = answer[section.end():section_end]
+    explanation_match = re.search(
+        r"(?im)^#{1,6}\s+Explanation of the Example\s*$",
+        section_body,
+    )
+    explanation = ""
+    if explanation_match:
+        explanation = section_body[explanation_match.end():].strip()
+        following_heading = re.search(r"(?m)^#{1,6}\s+", explanation)
+        if following_heading:
+            explanation = explanation[:following_heading.start()].strip()
+    if not explanation:
+        explanation = (
+            "The retrieved course material does not provide additional "
+            "explanation for this example."
+        )
+
+    example_section = (
+        "\n\n## Course-Supported Example\n\n"
+        f"### Input\n\n{input_content}\n\n"
+        f"### Output\n\n{output_content}\n\n"
+        f"### Explanation of the Example\n\n{explanation}\n"
+    )
+    return (
+        answer[:section.start()]
+        + example_section
+        + answer[section_end:]
+    ).strip()
 
 
 # ============================================================
@@ -3300,6 +3802,28 @@ class AITutor:
             question=question,
             results=results,
         )
+
+        if (
+            not grounding.get("grounded")
+            and diagram.get("grounded")
+            and diagram.get("mermaid")
+        ):
+            diagram_answer = _diagram_grounded_summary(question, diagram)
+            if diagram_answer:
+                answer = diagram_answer
+                grounding = self.answer_grounding_agent.run(
+                    answer=answer,
+                    results=results,
+                    question=question,
+                )
+                grounding["diagram_backed_response"] = True
+
+        if _question_intent(question) == "example":
+            answer = _enforce_example_io(
+                answer,
+                results,
+                question,
+            )
 
         # ----------------------------------------------------
         # FINAL RESPONSE
