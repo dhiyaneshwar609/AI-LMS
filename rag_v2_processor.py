@@ -739,15 +739,19 @@ def save_material(
     stats,
     extension
 ):
+    # Keep provenance useful without recording the machine-specific path of
+    # the uploaded source. The course/material path is a stable project-local
+    # identifier, and the original filename remains in its existing field.
+    source_identifier = (
+        f"rag_data_v2/{safe_name(course_id)}/{safe_name(material_id)}"
+    )
     document = {
         "rag_version": "2",
         "filename": filename,
         "extension": extension,
         "course_id": str(course_id),
         "material_id": str(material_id),
-        "source_file": str(
-            Path(source_path).resolve()
-        ),
+        "source_file": source_identifier,
         "file_sha256": file_hash,
         "page_count": len(page_records),
         "chunk_count": len(chunks),
@@ -787,9 +791,7 @@ def save_material(
         "extension": extension,
         "course_id": str(course_id),
         "material_id": str(material_id),
-        "source_file": str(
-            Path(source_path).resolve()
-        ),
+        "source_file": source_identifier,
         "file_sha256": file_hash,
         "page_count": len(page_records),
         "chunk_count": len(chunks),

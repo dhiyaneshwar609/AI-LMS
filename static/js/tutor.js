@@ -522,28 +522,22 @@ function uniqueSourceLabels(sources){
   return out;
 }
 
-function normalizeEscapedMarkdown(text){
-  return String(text).replace(/\r\n?/g,'\n')
-    .replace(/^(\s*)\\(#{1,6})(?=\s)/gm,'$1$2')
-    .replace(/^(\s*)\\([-+*])(?=\s)/gm,'$1$2')
-    .replace(/^(\s*)\\(>)(?=\s)/gm,'$1$2')
-    .replace(/^(\s*)\\([-*_]{3,})\s*$/gm,'$1$2')
-    .replace(/^(\s*)\\(`{3,}|~{3,})(.*)$/gm,'$1$2$3')
-    .replace(/\\\*\\\*(\S(?:.*?\S)?)\\\*\\\*/g,'**$1**')
-    .replace(/\\\*\*(\S(?:.*?\S)?)\\\*\*/g,'**$1**')
-    .replace(/\\\*([^*\s](?:[^*\n]*?[^*\s])?)\\\*/g,'*$1*')
-    .replace(/\\`([^`\n]+)\\`/g,'`$1`');
-}
-
 function formatInlineMarkdown(text){
-  let value=escapeHtml(text);
+  let value=String(text);
   const codeSpans=[];
   const mathSpans=[];
+  const escapedMarkdown=[];
   value=value.replace(/`([^`\n]+)`/g,(_,code)=>{
     const token=`\u0000INLINECODE${codeSpans.length}\u0000`;
-    codeSpans.push(`<code class="inline-code">${code}</code>`);
+    codeSpans.push(`<code class="inline-code">${escapeHtml(code)}</code>`);
     return token;
   });
+  value=value.replace(/\\([^\w\s])/g,(_,character)=>{
+    const token=`\u0000ESCAPEDMARKDOWN${escapedMarkdown.length}\u0000`;
+    escapedMarkdown.push(escapeHtml(character));
+    return token;
+  });
+  value=escapeHtml(value);
   value=value.replace(/\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$\$[\s\S]*?\$\$|\$(?!\$)[^$\n]+\$/g,math=>{
     const token=`\u0000INLINEMATH${mathSpans.length}\u0000`;
     mathSpans.push(math);
@@ -566,6 +560,7 @@ function formatInlineMarkdown(text){
   value=value.replace(/(^|[^\w_])_([^_\n]+)_(?!\w)/g,'$1<em>$2</em>');
   mathSpans.forEach((math,index)=>{value=value.replace(`\u0000INLINEMATH${index}\u0000`,math);});
   generatedMath.forEach((math,index)=>{value=value.replace(`\u0000GENERATEDMATH${index}\u0000`,math);});
+  escapedMarkdown.forEach((character,index)=>{value=value.replace(`\u0000ESCAPEDMARKDOWN${index}\u0000`,character);});
   codeSpans.forEach((code,index)=>{value=value.replace(`\u0000INLINECODE${index}\u0000`,code);});
   return value;
 }
@@ -631,7 +626,7 @@ function renderMarkdownTable(headerLine,bodyLines){
 }
 
 function renderMarkdownList(lines,start){
-  const first=normalizeEscapedMarkdown(lines[start]).match(/^([ \t]*)([-+*]|\d+[.)])\s+(.+)$/);
+  const first=lines[start].match(/^([ \t]*)([-+*]|\d+[.)])\s+(.+)$/);
   const baseIndent=first[1].replace(/\t/g,'    ').length;
   const ordered=/^\d/.test(first[2]);
   const tag=ordered?'ol':'ul';
@@ -639,7 +634,23 @@ function renderMarkdownList(lines,start){
   let index=start;
 
   while(index<lines.length){
-    const match=normalizeEscapedMarkdown(lines[index]).match(/^([ \t]*)([-+*]|\d+[.)])\s+(.+)$/);
+    // Models often put a blank line between numbered steps. Keep that
+    // whitespace inside the same list when the next item has matching type
+    // and indentation; other blank lines still terminate the list normally.
+    if(!lines[index].trim()){
+      let next=index;
+      while(next<lines.length&&!lines[next].trim())next++;
+      const nextMatch=next<lines.length
+        ?lines[next].match(/^([ \t]*)([-+*]|\d+[.)])\s+(.+)$/)
+        :null;
+      const nextIndent=nextMatch?nextMatch[1].replace(/\t/g,'    ').length:-1;
+      if(nextMatch&&nextIndent===baseIndent&&/^\d/.test(nextMatch[2])===ordered){
+        index=next;
+        continue;
+      }
+      break;
+    }
+    const match=lines[index].match(/^([ \t]*)([-+*]|\d+[.)])\s+(.+)$/);
     if(!match)break;
     const indent=match[1].replace(/\t/g,'    ').length;
     if(indent<baseIndent)break;
@@ -682,7 +693,7 @@ function formatAnswer(text){
   const fencedBlocks=[];
   const lines=[];
   for(let sourceIndex=0;sourceIndex<sourceLines.length;){
-    const fence=normalizeEscapedMarkdown(sourceLines[sourceIndex]).match(/^\s*(`{3,}|~{3,})(.*)$/);
+    const fence=sourceLines[sourceIndex].match(/^\s*(`{3,}|~{3,})(.*)$/);
     if(!fence){
       lines.push(sourceLines[sourceIndex++]);
       continue;
@@ -691,7 +702,7 @@ function formatAnswer(text){
     const close=new RegExp(`^\\s*${fence[1][0]}{${fence[1].length},}\\s*$`);
     const code=[];
     sourceIndex++;
-    while(sourceIndex<sourceLines.length&&!close.test(normalizeEscapedMarkdown(sourceLines[sourceIndex])))code.push(sourceLines[sourceIndex++]);
+    while(sourceIndex<sourceLines.length&&!close.test(sourceLines[sourceIndex]))code.push(sourceLines[sourceIndex++]);
     if(sourceIndex<sourceLines.length)sourceIndex++;
     const token=`\u0000FENCEDCODE${fencedBlocks.length}\u0000`;
     fencedBlocks.push(renderCodeBlock(code.join('\n'),language,'fenced-code-block'));
@@ -708,7 +719,7 @@ function formatAnswer(text){
   };
 
   while(index<lines.length){
-    const line=normalizeEscapedMarkdown(lines[index]);
+    const line=lines[index];
     const protectedCode=line.match(/^\u0000FENCEDCODE(\d+)\u0000$/);
     if(protectedCode){
       flushParagraph();
@@ -733,11 +744,11 @@ function formatAnswer(text){
       continue;
     }
 
-    if(index+1<lines.length&&line.includes('|')&&isMarkdownTableSeparator(normalizeEscapedMarkdown(lines[index+1]))){
+    if(index+1<lines.length&&line.includes('|')&&isMarkdownTableSeparator(lines[index+1])){
       flushParagraph();
       const body=[];
       index+=2;
-      while(index<lines.length&&normalizeEscapedMarkdown(lines[index]).includes('|')&&lines[index].trim())body.push(normalizeEscapedMarkdown(lines[index++]));
+      while(index<lines.length&&lines[index].includes('|')&&lines[index].trim())body.push(lines[index++]);
       output.push(renderMarkdownTable(line,body));
       continue;
     }
@@ -747,7 +758,7 @@ function formatAnswer(text){
       flushParagraph();
       const quoted=[];
       while(index<lines.length){
-        const match=normalizeEscapedMarkdown(lines[index]).match(/^ {0,3}>\s?(.*)$/);
+        const match=lines[index].match(/^ {0,3}>\s?(.*)$/);
         if(!match)break;
         quoted.push(formatInlineMarkdown(match[1]));
         index++;
@@ -766,8 +777,8 @@ function formatAnswer(text){
 
     if(isAsciiBoxLine(line)){
       let end=index;
-      while(end<lines.length&&normalizeEscapedMarkdown(lines[end]).trim())end++;
-      const diagram=lines.slice(index,end).map(normalizeEscapedMarkdown);
+      while(end<lines.length&&lines[end].trim())end++;
+      const diagram=lines.slice(index,end);
       if(isAsciiBoxDiagram(diagram)){
         flushParagraph();
         output.push(renderCodeBlock(diagram.join('\n'),'text'));

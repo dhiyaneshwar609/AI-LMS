@@ -180,19 +180,29 @@ class ExampleAnswerGroundingTests(unittest.TestCase):
             answer,
         )
 
-    def test_missing_source_output_is_marked_unavailable(self):
+    def test_missing_example_evidence_removes_optional_section(self):
         answer = ai_tutor._enforce_example_io(
             "## Concept\nExample.\n\n## Course-Supported Example\n"
-            "### Input\nsource input\n### Output\ninvented output",
-            [{"text": "Input: source input\nprint(tokenize(text))"}],
+            "### Input\ninvented input\n### Output\ninvented output",
+            [{"text": "Tokenization converts text into tokens."}],
             QUESTION,
         )
 
-        self.assertIn(
-            "exact output is not available in the extracted text",
-            answer,
-        )
+        self.assertNotIn("Course-Supported Example", answer)
+        self.assertNotIn("### Input", answer)
+        self.assertNotIn("### Output", answer)
         self.assertNotIn("invented output", answer)
+
+    def test_partial_example_evidence_has_no_empty_or_placeholder_sections(self):
+        answer = ai_tutor._enforce_example_io(
+            "## Concept\nSupported.\n\n## Course-Supported Example\n"
+            "### Input\ninvented input\n### Output\ninvented output",
+            [{"text": "Input: source input"}],
+            QUESTION,
+        )
+        self.assertIn("### Input", answer)
+        self.assertNotIn("### Output", answer)
+        self.assertNotIn("exact output is not available", answer)
 
     def test_unrelated_printed_data_is_not_used_as_example_output(self):
         input_text, output_text = ai_tutor._example_io_from_results(

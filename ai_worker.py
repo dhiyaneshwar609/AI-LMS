@@ -1,13 +1,16 @@
 """Background worker for AI-LMS generation."""
 from __future__ import annotations
-import json, logging, sys, traceback
+import json, logging, sys, traceback, time
 from pathlib import Path
-from ai_tutor import get_ai_tutor
-from learning_mode import contextualize_question, build_learning_history, is_follow_up
-from youtube_recommender import recommend_youtube
 BASE_DIR=Path(__file__).resolve().parent
 LOG_DIR=BASE_DIR/'logs'; LOG_DIR.mkdir(exist_ok=True)
 logging.basicConfig(filename=str(LOG_DIR/'ai_worker.log'),level=logging.INFO,format='%(asctime)s | %(levelname)s | %(message)s')
+logger = logging.getLogger(__name__)
+WORKER_STARTED_AT = time.perf_counter()
+logger.info('phase=worker_started')
+from ai_tutor import get_ai_tutor
+from learning_mode import contextualize_question, build_learning_history, is_follow_up
+from youtube_recommender import recommend_youtube
 
 def normalize(raw):
     if isinstance(raw,str): return {'answer':raw,'sources':[],'diagram':None}
@@ -22,6 +25,7 @@ def main(request_path,result_path):
     result={'ok':False,'answer':'I could not generate the answer. Please try again.','sources':[],'youtube':None,'learning_mode':False}
     try:
         data=json.loads(Path(request_path).read_text(encoding='utf-8'))
+        logger.info('phase=request_loaded')
         question=str(data.get('question','')).strip()
         history=str(data.get('history_text',''))
         attachment_text=str(data.get('attachment_text',''))
@@ -40,12 +44,23 @@ def main(request_path,result_path):
 
         # AITutor owns contextual retrieval. Pass the exact student question
         # so answer intent and answer size are detected from the real wording.
-        raw=get_ai_tutor().ask(
-            question=question,
-            course_id=None,
-            material_id=None,
-            history=answer_history,
-        )
+        ask_started=time.perf_counter()
+        ask_succeeded=False
+        logger.info('phase=aitutor_ask_started')
+        try:
+            raw=get_ai_tutor().ask(
+                question=question,
+                course_id=None,
+                material_id=None,
+                history=answer_history,
+            )
+            ask_succeeded=True
+        finally:
+            logger.info(
+                'phase=aitutor_ask_completed success=%s elapsed_s=%.3f',
+                ask_succeeded,
+                time.perf_counter()-ask_started,
+            )
         normalized=normalize(raw)
 
         youtube=None
@@ -60,6 +75,12 @@ def main(request_path,result_path):
         logging.error('AI generation failed: %s\n%s',exc,traceback.format_exc())
         result={'ok':False,'answer':'I could not generate the answer. Please try again.','sources':[],'youtube':None,'learning_mode':bool(data.get('learning_mode',False)),'detail':str(exc)}
     Path(result_path).write_text(json.dumps(result,ensure_ascii=False),encoding='utf-8')
+    logger.info('phase=worker_result_written success=%s',bool(result.get('ok')))
+    logger.info(
+        'phase=worker_completed success=%s elapsed_s=%.3f',
+        bool(result.get('ok')),
+        time.perf_counter()-WORKER_STARTED_AT,
+    )
 
 if __name__=='__main__':
     if len(sys.argv)!=3: raise SystemExit('Usage: python ai_worker.py REQUEST_JSON RESULT_JSON')

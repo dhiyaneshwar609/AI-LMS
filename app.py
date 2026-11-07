@@ -7,6 +7,9 @@ from pathlib import Path
 from datetime import timedelta
 
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from database import (
     initialize_database,
@@ -51,7 +54,7 @@ FOLDER_DATA_DIR.mkdir(exist_ok=True)
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("AI_LMS_SECRET_KEY", "change-this-secret-key")
+app.secret_key = os.environ["AI_LMS_SECRET_KEY"]
 app.permanent_session_lifetime = timedelta(days=365)
 
 EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)

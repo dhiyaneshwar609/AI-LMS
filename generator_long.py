@@ -17,10 +17,14 @@ and other detailed academic questions.
 from __future__ import annotations
 
 import re
+import logging
+import time
 import numpy as np
 from hosted_llm import generate_draft, verify_and_correct
 from rag_v2_search import _load_model
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -434,17 +438,17 @@ concise explanation supported by the course material. Then use this structure:
 ## Course-Supported Example
 
 ### Input
-Copy the exact example input from the course material. If unavailable in the
-extracted text, state that explicitly.
+Copy the exact example input from the course material only when present.
 
 ### Output
 Copy the exact output explicitly present in the course material, preserving
 code and formatting. Never execute, calculate, reconstruct, or guess output.
-If unavailable, state that it is not available in the extracted course
-material.
+Omit this subsection when no explicit output is present.
 
 ### Explanation of the Example
-Explain only what the course evidence supports. Do not omit Input or Output.
+Explain only what the course evidence supports. Omit any subsection that has
+no supporting evidence, and omit the example section when no relevant example
+is present in the course material.
 """,
 
         "list": """
@@ -481,10 +485,13 @@ FORMAT:
 
         "algorithm": """
 FORMAT:
-- Start with the algorithm/procedure definition or purpose when supported.
-- Use "### Steps" or an equivalent clear heading.
-- Give the steps in correct logical order.
-- Include an example, complexity, or note only when supported by the evidence.
+- Start with a clear definition or purpose of the algorithm/procedure.
+- Use "### Steps" or an equivalent clear heading and present the steps in correct logical order.
+- Explain each important step sufficiently for the reader to understand its role.
+- Include important conditions and working details when supported by the retrieved course evidence.
+- Include pseudocode or a flow only when supported by the evidence and appropriate to the question.
+- Include complexity or an example only when supported by the evidence and relevant to the question.
+- Write at least 60 words when the retrieved evidence supports that amount of detail.
 """,
 
         "diagram": """
@@ -776,6 +783,7 @@ def _build_user_prompt(
     answer_format: str,
     retry: bool = False,
     history: str = "",
+    requirements_context=None,
 ) -> str:
 
     extra = ""
@@ -796,6 +804,9 @@ Make all technical notation readable.
 
 Do not output control characters.
 """.strip()
+
+    requirement_instruction = _requirements_instruction(requirements_context)
+    requirement_block = "\n\n" + requirement_instruction if requirement_instruction else ""
 
     return f"""
 Student question:
@@ -819,9 +830,9 @@ Retrieved course material — the ONLY factual source:
 
 {context}
 
-{extra}
+{extra}{requirement_block}
 
-Now write the final detailed academic answer.
+Now write at the resolved detail level. Use a moderately detailed academic answer for medium or structured requirements, and a complete structured academic answer only for detailed or high-mark requirements.
 
 Important:
 - Return only the answer.
@@ -838,12 +849,121 @@ Important:
 # OLLAMA CALL
 # ============================================================
 
+def _requirements_instruction(requirements_context=None) -> str:
+    if not isinstance(requirements_context, dict):
+        return ""
+
+    requirements = requirements_context.get("requirements_context")
+    if not isinstance(requirements, dict):
+        requirements = requirements_context
+
+    plan = requirements_context.get("plan")
+    if not isinstance(plan, list):
+        plan = []
+    sections = plan or requirements.get("required_sections", [])
+    sections = [str(item).replace("_", " ")[:100] for item in sections[:12]]
+
+    intent = requirements_context.get("intent") or requirements.get("intent")
+    answer_type = requirements_context.get("answer_type") or requirements.get("answer_type")
+    detail_level = requirements_context.get("detail_level") or requirements.get("detail_level")
+    answer_format = requirements_context.get("answer_format") or requirements.get("answer_format")
+    exam_marks = requirements_context.get("exam_marks")
+    if exam_marks is None:
+        exam_marks = requirements.get("exam_marks")
+    topic = requirements_context.get("topic") or requirements.get("topic")
+
+    lines = [
+        "ANSWER PRESENTATION REQUIREMENTS (format only; not factual evidence):",
+        "Use COURSE MATERIAL as the only factual source. Skip optional sections when unsupported; never invent content.",
+    ]
+    for label, value in (
+        ("Intent", intent),
+        ("Answer type", answer_type),
+        ("Detail level", detail_level),
+        ("Answer format", answer_format),
+    ):
+        if value:
+            lines.append(f"{label}: {str(value)[:80]}.")
+    if isinstance(exam_marks, int):
+        lines.append(f"Exam marks: {exam_marks}; use an appropriately complete structure.")
+        if exam_marks <= 2:
+            lines.append(
+                "For 2 marks, use at most two concise sentences. Give the direct answer or definition first, then add one distinct, relevant supporting point only when the course evidence supports one. Do not restate the first claim in different words; if the evidence supports only one point, give only that point."
+            )
+    if sections:
+        lines.append("Structure in order: " + "; ".join(sections) + ".")
+    if requirements.get("language_style") == "simple":
+        lines.append("Use simple, clear language while preserving supported technical meaning.")
+    if answer_format == "architecture":
+        if detail_level in {"structured", "medium"} and not (
+            isinstance(exam_marks, int) and exam_marks >= 8
+        ):
+            lines.append(
+                "For a normal architecture explanation, combine each core component with its role, then explain only the key supported relationships. Keep the answer moderately detailed; omit peripheral ecosystem tools unless the question asks for them."
+            )
+        elif detail_level == "detailed" or (
+            isinstance(exam_marks, int) and exam_marks >= 8
+        ):
+            lines.append(
+                "Use the complete planned structure appropriate to the requested detailed or exam-mark answer. Keep every component, role, and relationship grounded in course evidence."
+            )
+    if answer_format in {"architecture", "process", "explanation", "general"}:
+        lines.append(
+            "Preserve the actor and action stated in the evidence. If the evidence says MapReduce schedules mappers near HDFS blocks, describe MapReduce as working with HDFS; do not attribute that scheduling action to HDFS alone."
+        )
+    optional_requests = []
+    for field, label in (
+        ("include_example", "example"),
+        ("include_diagram", "diagram"),
+        ("include_pseudocode", "pseudocode or flow"),
+        ("include_complexity", "complexity details"),
+    ):
+        if requirements.get(field):
+            optional_requests.append(label)
+    if optional_requests:
+        lines.append(
+            "Requested optional content: " + ", ".join(optional_requests)
+            + "; include each only when supported by course evidence and appropriate."
+        )
+    if topic:
+        lines.append(
+            "Topic identifier for resolving references only (not factual evidence): "
+            + str(topic)[:120]
+            + "."
+        )
+    return "\n".join(lines)
+
+
+def _log_generation_result(kind, requirements_context, answer_format, answer) -> None:
+    requirements = {}
+    if isinstance(requirements_context, dict):
+        nested = requirements_context.get("requirements_context")
+        requirements = nested if isinstance(nested, dict) else requirements_context
+    fields_used = [
+        field for field in (
+            "intent", "answer_type", "detail_level", "exam_marks", "answer_format",
+            "required_sections", "include_example", "include_diagram",
+            "include_pseudocode", "include_complexity", "language_style", "topic",
+        ) if field in requirements
+    ]
+    logger.info(
+        "phase=generator_requirements kind=%s supplied=%s fields_used=%s requested_format=%s requested_detail=%s exam_marks=%s answer_length_chars=%d",
+        kind,
+        bool(requirements_context),
+        ",".join(fields_used),
+        str(requirements.get("answer_format") or answer_format or "")[:80],
+        str(requirements.get("detail_level") or "")[:80],
+        requirements.get("exam_marks"),
+        len(str(answer or "")),
+    )
+
 def _call_generator(
     question: str,
     context: str,
     answer_format: str = "general",
     retry: bool = False,
     history: str = "",
+    requirements_context=None,
 ) -> str:
 
     if not context:
@@ -865,6 +985,7 @@ material. Do not add outside knowledge.
         answer_format=answer_format,
         retry=retry,
         history=history,
+        requirements_context=requirements_context,
     )
 
     if extra:
@@ -882,13 +1003,20 @@ def _verify_answer(
     context: str,
     answer_format: str,
     history: str = "",
+    requirements_context=None,
 ) -> str:
+    requirement_instruction = _requirements_instruction(requirements_context)
+    verifier_history = (
+        f"{history}\n\n{requirement_instruction}"
+        if requirement_instruction
+        else history
+    )
     return verify_and_correct(
         question=question,
         draft_answer=draft_answer,
         course_context=context,
         answer_format=answer_format,
-        history=history,
+        history=verifier_history,
         long_answer=True,
     )
 
@@ -1269,6 +1397,25 @@ def _has_unsupported_specifics(answer: str, results: List[Dict[str, Any]]) -> bo
     return any(number not in source_numbers for number in answer_numbers)
 
 
+def _has_incomplete_ending(answer: str) -> bool:
+    """Reject obvious dangling prose while allowing short complete answers."""
+    text = _clean_answer(answer).rstrip()
+    if not text:
+        return True
+
+    last_line = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "")
+    # Tables and code/diagram blocks can validly end without prose punctuation.
+    if last_line.startswith("|") or re.fullmatch(r"[`~]+", last_line):
+        return False
+
+    ending = re.sub(r"[.!?;:,\s]+$", "", last_line).lower()
+    dangling = re.compile(
+        r"(?:\b(?:and|or|but|to|with|for|of|in|on|by|as|that|which|because|while|including|such as)"
+        r"|\b(?:execute|perform|provide|ensure|allow|include|consist|depend|enable|support|contain))$"
+    )
+    return bool(dangling.search(ending))
+
+
 
 
 def _is_usable_answer(
@@ -1276,17 +1423,51 @@ def _is_usable_answer(
     answer: str,
     answer_format: str,
     results: List[Dict[str, Any]],
+    attempt: int | str = "unknown",
+    candidate: str = "unknown",
+    draft_empty: bool | None = None,
+    verifier_called: bool | None = None,
 ) -> bool:
 
     answer = _clean_answer(answer)
+    word_count = len(_words(answer))
+    log_context = (
+        attempt,
+        candidate,
+        draft_empty,
+        verifier_called,
+    )
 
     if not answer:
+        logger.info(
+            'phase=generator_candidate_rejected kind=long attempt=%s candidate=%s '
+            'reason=empty word_count=0 draft_empty=%s verifier_called=%s',
+            *log_context,
+        )
+        return False
+
+    if _has_incomplete_ending(answer):
+        logger.info(
+            'phase=generator_candidate_rejected kind=long attempt=%s candidate=%s '
+            'reason=incomplete_ending word_count=%d draft_empty=%s verifier_called=%s',
+            *log_context[:2], word_count, *log_context[2:],
+        )
         return False
 
     if _looks_like_evidence_list(answer):
+        logger.info(
+            'phase=generator_candidate_rejected kind=long attempt=%s candidate=%s '
+            'reason=raw_evidence word_count=%d draft_empty=%s verifier_called=%s',
+            *log_context[:2], word_count, *log_context[2:],
+        )
         return False
 
     if _looks_like_meta_answer(answer):
+        logger.info(
+            'phase=generator_candidate_rejected kind=long attempt=%s candidate=%s '
+            'reason=meta_answer word_count=%d draft_empty=%s verifier_called=%s',
+            *log_context[:2], word_count, *log_context[2:],
+        )
         return False
 
     overlap = _answer_overlap(
@@ -1298,6 +1479,12 @@ def _is_usable_answer(
     # below is the important grounding gate because a correct academic answer
     # may naturally use terminology not present verbatim in the question.
     if overlap < 0.04:
+        logger.info(
+            'phase=generator_candidate_rejected kind=long attempt=%s candidate=%s '
+            'reason=question_overlap overlap=%.4f threshold=0.0400 word_count=%d '
+            'draft_empty=%s verifier_called=%s',
+            *log_context[:2], overlap, word_count, *log_context[2:],
+        )
         return False
 
     if not _has_reasonable_structure(
@@ -1305,13 +1492,45 @@ def _is_usable_answer(
         answer_format,
         results,
     ):
+        structure_thresholds = {
+            "comparison": "table_lines>=2_and_separator",
+            "numerical": "word_count>=20",
+            "algorithm": "word_count>=60_and_steps_or_heading_or_two_paragraphs",
+            "list": "word_count>=60_and_numbered_or_bulleted",
+            "classification": "word_count>=60_and_numbered_or_bulleted",
+            "diagram": "word_count>=20_and_arrow_or_pipe",
+            "process": "word_count>=60_or_(word_count>=80_and_heading)_or_(word_count>=120_and_two_paragraphs)",
+            "architecture": "word_count>=60_or_(word_count>=80_and_heading)_or_(word_count>=120_and_two_paragraphs)",
+            "explanation": "word_count>=60_or_(word_count>=80_and_heading)_or_(word_count>=120_and_two_paragraphs)",
+            "advantages_limitations": "word_count>=60_or_(word_count>=80_and_heading)_or_(word_count>=120_and_two_paragraphs)",
+            "general": "word_count>=60_or_(word_count>=80_and_heading)_or_(word_count>=120_and_two_paragraphs)",
+        }.get(answer_format, "word_count>=60")
+        logger.info(
+            'phase=generator_candidate_rejected kind=long attempt=%s candidate=%s '
+            'reason=structure_length answer_format=%s word_count=%d thresholds=%s '
+            'draft_empty=%s verifier_called=%s',
+            *log_context[:2], answer_format, word_count, structure_thresholds,
+            *log_context[2:],
+        )
         return False
 
     # Reject answers that are largely unrelated to the retrieved evidence.
-    if _source_grounding_score(answer, results) < 0.28:
+    grounding_score = _source_grounding_score(answer, results)
+    if grounding_score < 0.28:
+        logger.info(
+            'phase=generator_candidate_rejected kind=long attempt=%s candidate=%s '
+            'reason=source_grounding grounding_score=%.4f threshold=0.2800 '
+            'word_count=%d draft_empty=%s verifier_called=%s',
+            *log_context[:2], grounding_score, word_count, *log_context[2:],
+        )
         return False
 
     if _has_unsupported_specifics(answer, results):
+        logger.info(
+            'phase=generator_candidate_rejected kind=long attempt=%s candidate=%s '
+            'reason=unsupported_specifics word_count=%d draft_empty=%s verifier_called=%s',
+            *log_context[:2], word_count, *log_context[2:],
+        )
         return False
 
     return True
@@ -1325,6 +1544,7 @@ def generate_long_answer(
     question: str,
     results: List[Dict[str, Any]],
     history: str = "",
+    requirements_context=None,
 ) -> str:
     """
     Generate a detailed answer from RAG V2 results.
@@ -1335,17 +1555,26 @@ def generate_long_answer(
     question = _clean_text(question)
 
     if not question:
+        _log_generation_result("long", requirements_context, "", "")
         return ""
 
     if not results:
+        _log_generation_result("long", requirements_context, "", "")
         return ""
 
     context = build_long_context(results)
 
     if not context:
+        _log_generation_result("long", requirements_context, "", "")
         return ""
 
     answer_format = detect_answer_format(question)
+    logger.info('phase=generator_started kind=long')
+    logger.info('phase=generator_attempt_started kind=long attempt=1')
+
+    def finish(answer: str) -> str:
+        _log_generation_result("long", requirements_context, answer_format, answer)
+        return answer
 
     # --------------------------------------------------------
     # Attempt 1: generator -> verifier
@@ -1356,71 +1585,157 @@ def generate_long_answer(
         answer_format=answer_format,
         retry=False,
         history=history,
+        requirements_context=requirements_context,
+    )
+    logger.info(
+        'phase=generator_draft_generated kind=long attempt=1 empty=%s word_count=%d',
+        not bool(_clean_answer(draft)),
+        len(_words(_clean_answer(draft))),
     )
 
+    verifier_called = bool(draft and context)
     verified = _verify_answer(
         question=question,
         draft_answer=draft,
         context=context,
         answer_format=answer_format,
         history=history,
+        requirements_context=requirements_context,
+    )
+    logger.info(
+        'phase=generator_verifier_completed kind=long attempt=1 '
+        'verifier_called=%s result_empty=%s',
+        verifier_called,
+        not bool(_clean_answer(verified)),
     )
 
-    if _is_usable_answer(
+    validation_started = time.perf_counter()
+    verified_usable = _is_usable_answer(
         question,
         verified,
         answer_format,
         results,
-    ):
-        return _clean_answer(verified)
+        attempt=1,
+        candidate="verified",
+        draft_empty=not bool(_clean_answer(draft)),
+        verifier_called=verifier_called,
+    )
+    logger.info(
+        'phase=generator_validation kind=long attempt=1 candidate=verified accepted=%s '
+        'draft_empty=%s verifier_called=%s elapsed_s=%.3f',
+        verified_usable,
+        not bool(_clean_answer(draft)),
+        verifier_called,
+        time.perf_counter() - validation_started,
+    )
+    if verified_usable:
+        return finish(_clean_answer(verified))
 
     # If the verifier is temporarily unavailable, keep the existing
     # grounding/structure gate as a safe fallback for a valid draft.
-    if _is_usable_answer(
+    validation_started = time.perf_counter()
+    draft_usable = _is_usable_answer(
         question,
         draft,
         answer_format,
         results,
-    ):
-        return _clean_answer(draft)
+        attempt=1,
+        candidate="draft",
+        draft_empty=not bool(_clean_answer(draft)),
+        verifier_called=verifier_called,
+    )
+    logger.info(
+        'phase=generator_validation kind=long attempt=1 candidate=draft accepted=%s '
+        'draft_empty=%s verifier_called=%s elapsed_s=%.3f',
+        draft_usable,
+        not bool(_clean_answer(draft)),
+        verifier_called,
+        time.perf_counter() - validation_started,
+    )
+    if draft_usable:
+        return finish(_clean_answer(draft))
 
     # --------------------------------------------------------
     # Attempt 2: corrected generator -> verifier
     # --------------------------------------------------------
+    logger.info('phase=generator_retry kind=long attempt=2')
+    logger.info('phase=generator_attempt_started kind=long attempt=2')
     retry_draft = _call_generator(
         question=question,
         context=context,
         answer_format=answer_format,
         retry=True,
         history=history,
+        requirements_context=requirements_context,
+    )
+    logger.info(
+        'phase=generator_draft_generated kind=long attempt=2 empty=%s word_count=%d',
+        not bool(_clean_answer(retry_draft)),
+        len(_words(_clean_answer(retry_draft))),
     )
 
+    retry_verifier_called = bool(retry_draft and context)
     retry_verified = _verify_answer(
         question=question,
         draft_answer=retry_draft,
         context=context,
         answer_format=answer_format,
         history=history,
+        requirements_context=requirements_context,
+    )
+    logger.info(
+        'phase=generator_verifier_completed kind=long attempt=2 '
+        'verifier_called=%s result_empty=%s',
+        retry_verifier_called,
+        not bool(_clean_answer(retry_verified)),
     )
 
-    if _is_usable_answer(
+    validation_started = time.perf_counter()
+    retry_verified_usable = _is_usable_answer(
         question,
         retry_verified,
         answer_format,
         results,
-    ):
-        return _clean_answer(retry_verified)
+        attempt=2,
+        candidate="verified",
+        draft_empty=not bool(_clean_answer(retry_draft)),
+        verifier_called=retry_verifier_called,
+    )
+    logger.info(
+        'phase=generator_validation kind=long attempt=2 candidate=verified accepted=%s '
+        'draft_empty=%s verifier_called=%s elapsed_s=%.3f',
+        retry_verified_usable,
+        not bool(_clean_answer(retry_draft)),
+        retry_verifier_called,
+        time.perf_counter() - validation_started,
+    )
+    if retry_verified_usable:
+        return finish(_clean_answer(retry_verified))
 
-    if _is_usable_answer(
+    validation_started = time.perf_counter()
+    retry_draft_usable = _is_usable_answer(
         question,
         retry_draft,
         answer_format,
         results,
-    ):
-        return _clean_answer(retry_draft)
+        attempt=2,
+        candidate="draft",
+        draft_empty=not bool(_clean_answer(retry_draft)),
+        verifier_called=retry_verifier_called,
+    )
+    logger.info(
+        'phase=generator_validation kind=long attempt=2 candidate=draft accepted=%s '
+        'draft_empty=%s verifier_called=%s elapsed_s=%.3f',
+        retry_draft_usable,
+        not bool(_clean_answer(retry_draft)),
+        retry_verifier_called,
+        time.perf_counter() - validation_started,
+    )
+    if retry_draft_usable:
+        return finish(_clean_answer(retry_draft))
 
     # Do not return raw retrieved evidence as if it were an answer.
-    return ""
+    return finish("")
 
 
 # ============================================================
@@ -1431,6 +1746,7 @@ def generate_answer(
     question: str,
     results: List[Dict[str, Any]],
     history: str = "",
+    requirements_context=None,
 ) -> str:
     """
     Compatibility wrapper in case another part of the LMS imports
@@ -1441,4 +1757,5 @@ def generate_answer(
         question=question,
         results=results,
         history=history,
+        requirements_context=requirements_context,
     )

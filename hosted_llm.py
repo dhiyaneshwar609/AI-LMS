@@ -13,12 +13,17 @@ The public interfaces used by ai_tutor.py remain unchanged:
 from __future__ import annotations
 
 import os
+import logging
+import re
+import time
 from typing import Optional
 
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -131,6 +136,29 @@ def _extract_ollama_content(data: dict) -> str:
     ).strip()
 
 
+def _redact_llm_sensitive_text(text: str, sensitive_values=()) -> str:
+    """Redact credentials and request text from diagnostic strings."""
+    body = str(text or "")
+    body = re.sub(
+        r'(?i)("?(?:authorization|api[_-]?key|access[_-]?token|token|secret|password)"?\s*[:=]\s*"?)[^"&,}\s]+',
+        r"\1[REDACTED]",
+        body,
+    )
+    body = re.sub(r"(?i)Bearer\s+[^\s\"']+", "Bearer [REDACTED]", body)
+    for sensitive_value in sensitive_values:
+        if sensitive_value:
+            body = body.replace(str(sensitive_value), "[REDACTED]")
+    return body
+
+
+def _safe_error_body(response: requests.Response, sensitive_values=()) -> str:
+    """Return an API error body with credentials and request text redacted."""
+    return _redact_llm_sensitive_text(
+        getattr(response, "text", ""),
+        sensitive_values=sensitive_values,
+    )
+
+
 # ============================================================
 # GROQ / OPENAI-COMPATIBLE CHAT
 # ============================================================
@@ -143,9 +171,19 @@ def _chat_groq(
     reasoning_effort: Optional[str] = None,
 ) -> str:
 
+    started = time.perf_counter()
+    logger.info(
+        'phase=llm_request_started provider=groq model=%s',
+        model,
+    )
+
     if not API_KEY:
-        print(
-            "[hosted_llm] Missing LLM_API_KEY/GROQ_API_KEY."
+        logger.error(
+            'phase=llm_request_failed provider=groq model=%s '
+            'error_type=MissingAPIKey error="Missing LLM_API_KEY/GROQ_API_KEY" '
+            'elapsed_s=%.3f',
+            model,
+            time.perf_counter() - started,
         )
         return ""
 
@@ -182,13 +220,52 @@ def _chat_groq(
 
         response.raise_for_status()
 
-        return _extract_content(
-            response.json()
+        data = response.json()
+        choices = data.get("choices") or []
+        choice = choices[0] if choices else {}
+        finish_reason = choice.get("finish_reason")
+        message = choice.get("message") or {}
+        response_content_length = len(str(message.get("content") or ""))
+        content = _extract_content(data)
+        logger.info(
+            'phase=llm_request_completed provider=groq model=%s status_code=%s '
+            'elapsed_s=%.3f response_content_length=%d extracted_content_length=%d '
+            'finish_reason=%s',
+            model,
+            response.status_code,
+            time.perf_counter() - started,
+            response_content_length,
+            len(content),
+            finish_reason,
         )
+        return content
+
+    except requests.exceptions.HTTPError as exc:
+        error_response = exc.response
+        logger.error(
+            'phase=llm_request_http_error provider=groq model=%s status_code=%s '
+            'response_body=%s elapsed_s=%.3f',
+            model,
+            getattr(error_response, "status_code", None),
+            _safe_error_body(
+                error_response,
+                sensitive_values=(API_KEY, system_prompt, user_prompt),
+            ) if error_response is not None else "",
+            time.perf_counter() - started,
+        )
+        return ""
 
     except Exception as exc:
-        print(
-            f"[hosted_llm] Groq/{model} error: {exc}"
+        logger.error(
+            'phase=llm_request_exception provider=groq model=%s '
+            'exception_type=%s message=%s elapsed_s=%.3f',
+            model,
+            type(exc).__name__,
+            _redact_llm_sensitive_text(
+                str(exc),
+                sensitive_values=(API_KEY, system_prompt, user_prompt),
+            ),
+            time.perf_counter() - started,
         )
         return ""
 
@@ -221,6 +298,9 @@ def _chat_ollama(
         },
     }
 
+    started = time.perf_counter()
+    logger.info('phase=ollama_call_started model=%s', OLLAMA_MODEL)
+
     try:
         response = requests.post(
             f"{OLLAMA_BASE_URL}/api/chat",
@@ -230,11 +310,45 @@ def _chat_ollama(
 
         response.raise_for_status()
 
-        return _extract_ollama_content(
-            response.json()
+        content = _extract_ollama_content(response.json())
+        logger.info(
+            'phase=ollama_call_completed model=%s success=%s elapsed_s=%.3f',
+            OLLAMA_MODEL,
+            bool(content),
+            time.perf_counter() - started,
         )
+        return content
+
+    except requests.exceptions.Timeout as exc:
+        logger.warning(
+            'phase=ollama_call_timeout model=%s error_type=%s elapsed_s=%.3f',
+            OLLAMA_MODEL,
+            type(exc).__name__,
+            time.perf_counter() - started,
+        )
+        print(
+            f"[hosted_llm] Ollama/{OLLAMA_MODEL} error: {exc}"
+        )
+        return ""
 
     except Exception as exc:
+        if isinstance(exc, requests.exceptions.HTTPError):
+            error_response = exc.response
+            logger.error(
+                'phase=ollama_call_http_error model=%s status_code=%s '
+                'reason=%s response_body=%s elapsed_s=%.3f',
+                OLLAMA_MODEL,
+                getattr(error_response, 'status_code', None),
+                getattr(error_response, 'reason', None),
+                getattr(error_response, 'text', ''),
+                time.perf_counter() - started,
+            )
+        logger.error(
+            'phase=ollama_call_exception model=%s error_type=%s elapsed_s=%.3f',
+            OLLAMA_MODEL,
+            type(exc).__name__,
+            time.perf_counter() - started,
+        )
         print(
             f"[hosted_llm] Ollama/{OLLAMA_MODEL} error: {exc}"
         )
@@ -333,6 +447,16 @@ You receive:
 Your task is to return the FINAL corrected answer.
 
 STRICT RULES:
+- Answer the original STUDENT QUESTION directly.
+- Preserve the student's requested task and answer intent.
+- Treat the draft as an answer to revise, not as source text to review.
+- You may correct, remove, or qualify unsupported claims using only the
+  supplied course material.
+- Never turn the answer into a source review, critique, correction report,
+  proof-editing report, or meta-analysis of the course material.
+- Do not add "Key Changes", "Justifications", "Additional Notes about
+  revision", or similar editorial sections.
+- Return only the final answer to the student.
 - Check every factual claim in the draft against the course material.
 - Keep claims that are supported.
 - Correct claims that conflict with the course material.
@@ -375,13 +499,30 @@ Now verify the draft against the course material and return only the
 corrected final answer.
 """.strip()
 
-    return _chat(
+    verifier_started = time.perf_counter()
+    if LLM_PROVIDER == "local":
+        logger.info(
+            'phase=verifier_call_started model=%s',
+            OLLAMA_MODEL,
+        )
+
+    answer = _chat(
         model=VERIFIER_MODEL,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         timeout=VERIFIER_TIMEOUT,
         reasoning_effort=VERIFIER_REASONING,
     )
+
+    if LLM_PROVIDER == "local":
+        logger.info(
+            'phase=verifier_call_completed model=%s success=%s elapsed_s=%.3f',
+            OLLAMA_MODEL,
+            bool(answer),
+            time.perf_counter() - verifier_started,
+        )
+
+    return answer
 
 
 # ============================================================

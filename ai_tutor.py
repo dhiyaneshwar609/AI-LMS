@@ -59,13 +59,19 @@ Design goals:
 from __future__ import annotations
 
 import re
+import logging
+import json
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from rag_v2_search import search as rag_v2_search
+from multi_question import decompose_questions
 
 # Route directly to the grounded short/long generators.
 from generator_short import generate_short_answer
-from generator_long import generate_long_answer
+from generator_long import generate_long_answer, detect_answer_format as detect_long_answer_format
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -414,25 +420,25 @@ _FOLLOW_UP_PATTERNS = [
 
     r"^\s*how\s*\??$",
 
-    r"^\s*what\s+about\s+(?:this|that)\s*\??$",
+    r"^\s*what\s+about\s+(?:it|this|that)\s*\??$",
 
-    r"^\s*explain\s+(?:this|that)\s*(?:again)?\s*$",
+    r"^\s*explain\s+(?:it|this|that)\s*(?:again)?\s*$",
 
     r"^\s*explain\s+again\s*$",
 
-    r"^\s*what\s+does\s+(?:this|that)\s+mean\s*\??$",
+    r"^\s*what\s+does\s+(?:it|this|that)\s+mean\s*\??$",
 
     r"^\s*what\s+happens\s+next\s*\??$",
 
     r"^\s*give\s+(?:me\s+)?an?\s+example\s*$",
 
-    r"^\s*give\s+an?\s+example\s+of\s+(?:this|that)\s*$",
+    r"^\s*give\s+an?\s+example\s+of\s+(?:it|this|that)\s*$",
 
-    r"^\s*why\s+is\s+(?:this|that)\s+needed\s*\??$",
+    r"^\s*why\s+is\s+(?:it|this|that)\s+needed\s*\??$",
 
-    r"^\s*how\s+does\s+(?:this|that)\s+work\s*\??$",
+    r"^\s*how\s+does\s+(?:it|this|that)\s+work\s*\??$",
 
-    r"^\s*can\s+you\s+explain\s+(?:this|that)\s*$",
+    r"^\s*can\s+you\s+explain\s+(?:it|this|that)\s*$",
 
 ]
 
@@ -456,18 +462,13 @@ def _is_follow_up(
             return True
 
 
-    meaningful_words = _words(
-        q
-    )
-
-
-    # Very short questions are usually contextual.
-    if len(meaningful_words) <= 3:
-
-        return True
-
-
-    return False
+    # A short question is not contextual merely because it has few words.
+    # Require an explicit referential subject and a request verb.
+    return bool(re.match(
+        r"^\s*(?:explain|describe|show|give|make|simplify)\s+"
+        r"(?:me\s+)?(?:it|this|that)\b",
+        q,
+    ))
 
 
 # ============================================================
@@ -478,9 +479,11 @@ def _extract_history_text(
     history: str
 ) -> str:
 
-    history = _clean_space(
-        history
-    )
+    history = str(history or "").replace("\r\n", "\n").replace("\r", "\n")
+    history = "\n".join(
+        re.sub(r"[ \t]+", " ", line).strip()
+        for line in history.split("\n")
+    ).strip()
 
     if not history:
         return ""
@@ -491,8 +494,10 @@ def _extract_history_text(
     # This prevents extremely long conversations from polluting
     # the retrieval query.
     if len(history) > 5000:
-
         history = history[-5000:]
+        first_turn_boundary = history.find("\n")
+        if first_turn_boundary >= 0:
+            history = history[first_turn_boundary + 1:]
 
 
     return history
@@ -2251,7 +2256,13 @@ class AnswerPlanner:
 
     name = "Answer Planning Agent"
 
-    def run(self, question: str, answer_type: str = "short", results=None) -> Dict[str, Any]:
+    def run(
+        self,
+        question: str,
+        answer_type: str = "short",
+        results=None,
+        requirements_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         q = _clean_space(question).lower()
         intent = _question_intent(question)
         topic = _question_topic(question)
@@ -2266,7 +2277,10 @@ class AnswerPlanner:
         elif intent == "algorithm":
             plan = ["purpose_or_concept", "ordered_steps", "pseudocode_or_flow_when_supported"]
         elif intent == "architecture":
-            plan = ["components", "roles", "relationships", "diagram_only_when_supported"]
+            if answer_type == "detailed":
+                plan = ["components", "roles", "relationships", "diagram_only_when_supported"]
+            else:
+                plan = ["components_and_roles", "core_relationships"]
         elif intent == "list":
             plan = ["direct_numbered_or_bulleted_list", "brief_explanations_when_supported"]
         elif intent == "how":
@@ -2291,7 +2305,7 @@ class AnswerPlanner:
                 "concept",
                 "course_supported_example",
                 "example_input_from_evidence",
-                "example_output_exactly_from_evidence_or_unavailable",
+                "example_output_exactly_from_evidence",
                 "explain_the_example_from_evidence",
             ]
         else:
@@ -2310,7 +2324,15 @@ class AnswerPlanner:
         # Remove duplicates while preserving order.
         plan = list(dict.fromkeys(plan))
 
-        return {
+        existing_plan_decision = {
+            "intent": intent,
+            "topic": _safe_requirement_log_text(topic),
+            "answer_type": answer_type,
+            "response_depth": depth_instruction,
+            "plan": list(plan),
+        }
+
+        planned = {
             "intent": intent,
             "topic": topic,
             "answer_type": answer_type,
@@ -2318,6 +2340,447 @@ class AnswerPlanner:
             "plan": plan,
             "evidence_priority": ["primary", "supporting_context"],
         }
+        if requirements_context is not None:
+            requirements = dict(requirements_context)
+            provenance = requirements.get("provenance", {})
+            if not isinstance(provenance, dict):
+                provenance = {}
+
+            influenced_fields = []
+
+            def is_reliable(field: str) -> bool:
+                return provenance.get(field) in {"current_question", "recent_conversation"}
+
+            def append_plan_item(item: str, field: str) -> None:
+                if item not in plan:
+                    plan.append(item)
+                    if field not in influenced_fields:
+                        influenced_fields.append(field)
+
+            section_plan = {
+                "direct_definition": "concise_definition_first",
+                "definition_or_purpose": "purpose_or_concept",
+                "key_points": "relevant_key_points",
+                "direct_answer": "direct_answer",
+                "structured_explanation": "structured_explanation",
+                "introduction": "introduction",
+                "components": "components",
+                "roles": "roles",
+                "relationships": "relationships",
+                "components_and_roles": "components_and_roles",
+                "core_relationships": "core_relationships",
+                "ordered_steps": "ordered_steps",
+                "supported_working_conditions": "supported_working_conditions_when_supported",
+                "supported_working_details": "working_or_flow_when_supported",
+                "comparison_table": "comparison_table_when_appropriate",
+                "key_differences": "key_differences",
+                "course_supported_example": "course_supported_example_when_supported",
+                "supported_diagram": "grounded_diagram_when_supported",
+                "supported_pseudocode_or_flow": "pseudocode_or_flow_when_supported",
+                "supported_complexity": "complexity_when_supported",
+                "conclusion": "conclusion_from_supported_points",
+            }
+
+            # Keep the original plan as the baseline. Requirement signals
+            # refine structure only and never supply factual content.
+            for section in requirements.get("required_sections", []) or []:
+                plan_item = section_plan.get(str(section))
+                if plan_item and is_reliable("required_sections"):
+                    append_plan_item(plan_item, "required_sections")
+
+            answer_format = requirements.get("answer_format")
+            if is_reliable("answer_format"):
+                format_plan = {
+                    "definition": "concise_definition_first",
+                    "algorithm": "purpose_or_concept",
+                    "architecture": "components_and_roles",
+                    "comparison": "comparison_table_when_appropriate",
+                    "advantages_limitations": "advantages_and_limitations_when_supported",
+                    "process": "steps_in_correct_sequence",
+                    "explanation": "structured_explanation",
+                    "concise_exam": "concise_exam_oriented_response",
+                }.get(str(answer_format))
+                if format_plan:
+                    append_plan_item(format_plan, "answer_format")
+
+            final_intent = intent
+            if is_reliable("intent") and requirements.get("intent"):
+                final_intent = str(requirements["intent"])
+                if final_intent != intent:
+                    influenced_fields.append("intent")
+
+            final_answer_type = answer_type
+            if is_reliable("answer_type") and requirements.get("answer_type"):
+                final_answer_type = str(requirements["answer_type"])
+                if final_answer_type != answer_type:
+                    influenced_fields.append("answer_type")
+
+            detail_level = requirements.get("detail_level")
+            if is_reliable("detail_level"):
+                if detail_level == "detailed":
+                    append_plan_item("complete_structured_exam_answer", "detail_level")
+                elif detail_level == "concise_exam":
+                    append_plan_item("concise_exam_oriented_response", "detail_level")
+                elif detail_level == "simple":
+                    append_plan_item("simple_language_style", "detail_level")
+
+            exam_marks = requirements.get("exam_marks")
+            if is_reliable("exam_marks") and isinstance(exam_marks, int):
+                if exam_marks <= 2:
+                    # A current short-exam request takes precedence over the
+                    # generic explanation fallback in a general-intent plan.
+                    if "structured_relevant_explanation" in plan:
+                        plan.remove("structured_relevant_explanation")
+                        influenced_fields.append("exam_marks")
+                    append_plan_item("concise_exam_oriented_response", "exam_marks")
+                elif exam_marks >= 8:
+                    append_plan_item("complete_structured_exam_answer", "exam_marks")
+
+            final_response_depth = depth_instruction
+            if (
+                is_reliable("exam_marks")
+                and isinstance(exam_marks, int)
+                and exam_marks <= 2
+            ):
+                final_response_depth = "concise_exam_oriented_response"
+            elif (
+                is_reliable("exam_marks")
+                and isinstance(exam_marks, int)
+                and exam_marks >= 8
+            ) or (is_reliable("detail_level") and detail_level == "detailed"):
+                final_response_depth = "complete_structured_exam_answer"
+            elif is_reliable("detail_level") and detail_level == "concise_exam":
+                final_response_depth = "concise_exam_oriented_response"
+            if final_response_depth != depth_instruction:
+                influenced_fields.append("detail_level")
+
+            include_fields = (
+                ("include_example", "course_supported_example_when_supported"),
+                ("include_diagram", "grounded_diagram_when_supported"),
+                ("include_pseudocode", "pseudocode_or_flow_when_supported"),
+                ("include_complexity", "complexity_when_supported"),
+            )
+            for field, plan_item in include_fields:
+                derived_architecture_diagram = (
+                    field == "include_diagram"
+                    and requirements.get(field)
+                    and requirements.get("intent") == "architecture"
+                    and isinstance(exam_marks, int)
+                    and exam_marks >= 8
+                    and is_reliable("exam_marks")
+                )
+                if requirements.get(field) and (is_reliable(field) or derived_architecture_diagram):
+                    append_plan_item(plan_item, field)
+
+            if is_reliable("language_style") and requirements.get("language_style") == "simple":
+                append_plan_item("simple_language_style", "language_style")
+
+            final_topic = topic
+            if requirements.get("topic") and is_reliable("intent"):
+                final_topic = _safe_requirement_log_text(requirements["topic"])
+                if final_topic != topic:
+                    influenced_fields.append("topic")
+
+            section_status = []
+            for section in requirements.get("required_sections", []) or []:
+                section_name = str(section)
+                evidence_dependent = bool(
+                    re.search(r"supported|example|diagram|pseudocode|complexity|working|condition", section_name)
+                )
+                section_status.append({
+                    "section": section_name,
+                    "status": (
+                        "optional_if_supported_by_course_evidence"
+                        if evidence_dependent
+                        else "structural_guidance"
+                    ),
+                })
+
+            influenced_fields = list(dict.fromkeys(influenced_fields))
+            planned.update({
+                "intent": final_intent,
+                "topic": final_topic,
+                "answer_type": final_answer_type,
+                "response_depth": final_response_depth,
+                "plan": list(plan),
+                "answer_format": answer_format,
+                "detail_level": detail_level,
+                "exam_marks": exam_marks,
+                "requirement_section_status": section_status,
+                "requirements_context": requirements,
+            })
+
+            resolved_for_log = dict(requirements)
+            resolved_for_log["topic"] = _safe_requirement_log_text(requirements.get("topic", ""))
+            final_for_log = {
+                "intent": final_intent,
+                "topic": final_topic,
+                "answer_type": final_answer_type,
+                "response_depth": final_response_depth,
+                "answer_format": answer_format,
+                "detail_level": detail_level,
+                "exam_marks": exam_marks,
+                "plan": list(plan),
+                "requirement_section_status": section_status,
+            }
+            logger.info(
+                "phase=answer_planner_requirements existing=%s requirements=%s final=%s influenced_fields=%s",
+                json.dumps(existing_plan_decision, ensure_ascii=False, sort_keys=True),
+                json.dumps(resolved_for_log, ensure_ascii=False, sort_keys=True),
+                json.dumps(final_for_log, ensure_ascii=False, sort_keys=True),
+                json.dumps(influenced_fields),
+            )
+        return planned
+
+
+class AnswerRequirementEngine:
+    """Resolve deterministic answer requirements without using model or course data."""
+
+    _MARKS_RE = re.compile(r"\b(\d+)\s*[- ]?marks?\b", re.IGNORECASE)
+    _SIMPLE_RE = re.compile(
+        r"\b(?:simple|simpler|simply|easy|easier|plain english|in simple words)\b",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _student_turns(history: str) -> List[str]:
+        turns = re.findall(
+            r"(?:^|\n)\s*(?:Student|User|Question)\s*:\s*(.*?)(?=\n\s*(?:Student|User|Question|AI Tutor|Assistant|AI|Answer)\s*:|$)",
+            str(history or ""),
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        return [_clean_space(turn) for turn in turns if _clean_space(turn)]
+
+    @classmethod
+    def _is_contextual_follow_up(cls, question: str) -> bool:
+        return _is_follow_up(question)
+
+    @classmethod
+    def _detail_level(cls, answer_type: str, intent: str, answer_format: str) -> str:
+        if answer_type == "detailed":
+            return "detailed"
+        if answer_type == "short":
+            return "concise"
+        if answer_format in {"algorithm", "architecture", "comparison", "process"}:
+            return "structured"
+        return "medium"
+
+    @staticmethod
+    def _topic(question: str) -> str:
+        topic = _question_topic(question)
+        if topic:
+            return topic
+        cleaned = re.sub(r"\b\d+\s*[- ]?marks?\b", "", _clean_space(question), flags=re.IGNORECASE)
+        cleaned = re.sub(
+            r"^\s*(?:please\s+)?(?:differentiate\s+between|differentiate|compare|distinguish|contrast|explain|describe|discuss|elaborate|tell\s+me\s+about|give\s+me\s+an\s+overview\s+of)\s+",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^\s*(?:give|write|provide)\s+(?:(?:an?\s+)?answer\s+)?(?:for\s+)?",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b(?:in detail|in depth|simply|in simple words|with an? example|with examples|for an? example)\b.*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = cleaned.strip(" ?.!,:;")
+        cleaned = re.sub(r"\s+for\s*$", "", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip(" ?.!,:;")
+
+    @classmethod
+    def _sections(
+        cls,
+        intent: str,
+        answer_type: str,
+        exam_marks: Optional[int],
+        include_example: bool,
+        include_diagram: bool,
+        include_pseudocode: bool,
+        include_complexity: bool,
+    ) -> List[str]:
+        if exam_marks is not None and exam_marks <= 2:
+            sections = ["direct_answer", "key_points"]
+        elif intent == "comparison":
+            sections = ["comparison_table", "key_differences"]
+        elif intent == "algorithm":
+            sections = ["definition_or_purpose", "ordered_steps", "supported_working_conditions"]
+        elif intent == "architecture":
+            if exam_marks is None and answer_type != "detailed":
+                sections = ["introduction", "components_and_roles", "core_relationships"]
+            else:
+                sections = ["introduction", "components", "roles", "relationships"]
+        elif intent == "definition":
+            sections = ["direct_definition", "key_points"]
+        elif intent == "example":
+            sections = ["concept", "course_supported_example", "explanation"]
+        elif intent == "how":
+            sections = ["brief_introduction", "ordered_steps", "supported_working_details"]
+        else:
+            sections = ["direct_answer", "structured_explanation"]
+
+        if include_example and "course_supported_example" not in sections:
+            sections.append("course_supported_example")
+        if include_diagram:
+            sections.append("supported_diagram")
+        if include_pseudocode:
+            sections.append("supported_pseudocode_or_flow")
+        if include_complexity:
+            sections.append("supported_complexity")
+        if exam_marks is not None and exam_marks >= 8:
+            sections.append("conclusion")
+        return list(dict.fromkeys(sections))
+
+    def resolve(
+        self,
+        question: str,
+        history: str = "",
+        detected: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Return one requirements record; this method does not alter the tutor pipeline."""
+        question = _clean_space(question)
+        detected = dict(detected or QueryUnderstandingAgent().run(question))
+        current_intent = str(detected.get("intent", "general"))
+        current_answer_type = str(detected.get("answer_type", "short"))
+        current_format = detect_long_answer_format(question)
+        current_marks_match = self._MARKS_RE.search(question)
+        current_marks = int(current_marks_match.group(1)) if current_marks_match else None
+        is_follow_up = self._is_contextual_follow_up(question)
+        prior_turns = self._student_turns(history)
+        prior_question = prior_turns[-1] if is_follow_up and prior_turns else ""
+
+        # For referential follow-ups, inherit the immediately preceding student
+        # request as context, then let explicit wording in this question override it.
+        prior_detected = QueryUnderstandingAgent().run(prior_question) if prior_question else {}
+        prior_intent = str(prior_detected.get("intent", "general"))
+        prior_answer_type = str(prior_detected.get("answer_type", "short"))
+        prior_format = detect_long_answer_format(prior_question) if prior_question else "general"
+        prior_marks_match = self._MARKS_RE.search(prior_question) if prior_question else None
+        prior_marks = int(prior_marks_match.group(1)) if prior_marks_match else None
+
+        # A format cue like "with an example" augments a contextual request;
+        # it does not replace the topic's prior primary format.
+        current_is_addon_example = bool(
+            re.search(r"\bwith an? example\b", question, re.IGNORECASE)
+        )
+        inherit_context = bool(prior_question and is_follow_up)
+
+        explicit_current_intent = current_intent not in {"general", "example"}
+        intent = (
+            current_intent
+            if explicit_current_intent
+            else prior_intent if inherit_context else current_intent
+        )
+        answer_type = (
+            current_answer_type
+            if current_answer_type != "short"
+            else prior_answer_type if inherit_context else current_answer_type
+        )
+        answer_format = prior_format if inherit_context and current_is_addon_example else current_format
+        exam_marks = prior_marks if inherit_context else None
+        intent_source = "recent_conversation" if inherit_context else "current_question"
+        answer_type_source = "recent_conversation" if inherit_context else "existing_detection"
+        format_source = "recent_conversation" if inherit_context and current_is_addon_example else "current_question"
+        marks_source = "recent_conversation" if exam_marks is not None else "default"
+
+        if current_marks is not None:
+            exam_marks = current_marks
+            marks_source = "current_question"
+            answer_type = "short" if current_marks <= 2 else "medium" if current_marks <= 5 else "detailed"
+            answer_type_source = "current_question"
+            if current_marks <= 2 and current_format == "general":
+                answer_format = "concise_exam"
+                format_source = "current_question"
+        elif current_answer_type != "short":
+            answer_type = current_answer_type
+            answer_type_source = "existing_detection"
+
+        # Explicit current requests override contextual requirements field by field.
+        current_simple = bool(self._SIMPLE_RE.search(question))
+        current_example = bool(re.search(r"\bexamples?\b|\bwith an? example\b", question, re.IGNORECASE))
+        current_diagram = bool(re.search(r"\b(?:diagram|flowchart|draw|visualization)\b", question, re.IGNORECASE))
+        current_pseudocode = bool(re.search(r"\bpseudocode\b|\bflowchart\b", question, re.IGNORECASE))
+        current_complexity = bool(re.search(r"\bcomplexity\b|\bbig[- ]?o\b", question, re.IGNORECASE))
+
+        prior_simple = bool(self._SIMPLE_RE.search(prior_question)) if inherit_context else False
+        prior_example = bool(re.search(r"\bexamples?\b", prior_question, re.IGNORECASE)) if inherit_context else False
+        prior_diagram = bool(re.search(r"\b(?:diagram|flowchart|draw|visualization)\b", prior_question, re.IGNORECASE)) if inherit_context else False
+        prior_pseudocode = bool(re.search(r"\bpseudocode\b|\bflowchart\b", prior_question, re.IGNORECASE)) if inherit_context else False
+        prior_complexity = bool(re.search(r"\bcomplexity\b|\bbig[- ]?o\b", prior_question, re.IGNORECASE)) if inherit_context else False
+
+        include_example = current_example or prior_example
+        include_diagram = current_diagram or prior_diagram or bool(
+            intent == "architecture" and exam_marks is not None and exam_marks >= 8
+        )
+        include_pseudocode = current_pseudocode or prior_pseudocode
+        include_complexity = current_complexity or prior_complexity
+        language_style = "simple" if current_simple else "simple" if prior_simple else "clear_academic"
+        detail_level = "concise_exam" if current_marks is not None and current_marks <= 2 else self._detail_level(answer_type, intent, answer_format)
+        if current_simple:
+            detail_level = "simple"
+
+        provenance = {
+            "intent": intent_source,
+            "answer_type": answer_type_source,
+            "detail_level": "current_question" if current_simple or current_marks is not None else answer_type_source,
+            "exam_marks": marks_source,
+            "answer_format": format_source,
+            "required_sections": intent_source,
+            "include_example": "current_question" if current_example else "recent_conversation" if prior_example else "default",
+            "include_diagram": "current_question" if current_diagram else "recent_conversation" if prior_diagram else "default",
+            "include_pseudocode": "current_question" if current_pseudocode else "recent_conversation" if prior_pseudocode else "default",
+            "include_complexity": "current_question" if current_complexity else "recent_conversation" if prior_complexity else "default",
+            "language_style": "current_question" if current_simple else "recent_conversation" if prior_simple else "default",
+        }
+        sections = self._sections(
+            intent,
+            answer_type,
+            exam_marks,
+            include_example,
+            include_diagram,
+            include_pseudocode,
+            include_complexity,
+        )
+        if current_marks is not None and current_marks >= 8 and "conclusion" not in sections:
+            sections.append("conclusion")
+            provenance["required_sections"] = "current_question"
+
+        resolved_topic = self._topic(prior_question) if inherit_context else ""
+        resolved_topic = resolved_topic or self._topic(question)
+        return {
+            "intent": intent,
+            "answer_type": answer_type,
+            "detail_level": detail_level,
+            "exam_marks": exam_marks,
+            "answer_format": answer_format,
+            "required_sections": sections,
+            "include_example": include_example,
+            "include_diagram": include_diagram,
+            "include_pseudocode": include_pseudocode,
+            "include_complexity": include_complexity,
+            "language_style": language_style,
+            "topic": resolved_topic,
+            "provenance": provenance,
+        }
+
+
+def _safe_requirement_log_text(value: Any) -> str:
+    """Bound and redact common direct identifiers from requirement diagnostics."""
+    text = _clean_space(value)
+    text = re.sub(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", "[redacted-email]", text)
+    text = re.sub(
+        r"\b(?:my\s+)?(?:name|email|phone|mobile|student\s+id|password|api\s+key)\s*(?:is|:|=)\s*[^,;.!?]+",
+        "[redacted-personal-detail]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"(?<!\w)\+?\d[\d ().-]{7,}\d(?!\w)", "[redacted-number]", text)
+    return text[:300]
 
 
 # ============================================================
@@ -2434,9 +2897,9 @@ class AdaptiveLearningAgent:
             "example_focused": (
                 "Use the retrieved evidence to identify the example input and output. "
                 "Copy any explicit source output exactly; never calculate or infer a "
-                "missing output. If no explicit output is present, state that it is "
-                "not available in the extracted course material. Explain only what "
-                "the evidence supports."
+                "missing output. Omit any input, output, or explanation subsection "
+                "that lacks evidence, and omit the example section if no relevant "
+                "example is supported. Explain only what the evidence supports."
             ),
             "visual_explanation": "Use the grounded diagram supplied by the tutor when available. Do not invent components or relationships. If no grounded diagram is available, explain the concept in text instead of inventing a visual structure.",
             "exam_focused": "Write an academically structured answer suitable for the requested marks. Cover the planned sections using only supported evidence.",
@@ -2539,11 +3002,13 @@ class AnswerAgent:
                 if answer_type == "short"
                 else generate_long_answer
             )
-            answer = answer_generator(
-                question,
-                answer_results,
-                history=planned_history,
-            )
+            generation_kwargs = {"history": planned_history}
+            if (
+                isinstance(answer_plan, dict)
+                and isinstance(answer_plan.get("requirements_context"), dict)
+            ):
+                generation_kwargs["requirements_context"] = answer_plan
+            answer = answer_generator(question, answer_results, **generation_kwargs)
 
         except Exception:
             return (
@@ -2573,11 +3038,17 @@ class AnswerAgent:
                 "Add only relevant supported points, and do not quote or copy the sentence."
             )
             try:
+                revision_kwargs = {"history": revision_history}
+                if (
+                    isinstance(answer_plan, dict)
+                    and isinstance(answer_plan.get("requirements_context"), dict)
+                ):
+                    revision_kwargs["requirements_context"] = answer_plan
                 answer = str(
                     answer_generator(
                         question,
                         answer_results,
-                        history=revision_history,
+                        **revision_kwargs,
                     )
                     or ""
                 ).strip()
@@ -2797,21 +3268,22 @@ def _enforce_example_io(
     question: str = "",
 ) -> str:
     input_text, output_text = _example_io_from_results(results, question)
+    if not input_text and not output_text:
+        return re.sub(
+            r"(?ims)^##\s+Course-Supported Example\s*$.*?(?=^##\s+|\Z)",
+            "",
+            answer,
+        ).strip()
+
     if input_text:
         input_content = f"```text\n{input_text}\n```"
     else:
-        input_content = (
-            "The course material provides the example, but the exact input "
-            "is not available in the extracted text."
-        )
+        input_content = ""
 
     if output_text:
         output_content = f"```text\n{output_text}\n```"
     else:
-        output_content = (
-            "The course material provides the example, but the exact "
-            "output is not available in the extracted text."
-        )
+        output_content = ""
 
     if not re.search(r"(?im)^##\s+Course-Supported Example\s*$", answer):
         answer = answer.rstrip() + "\n\n## Course-Supported Example\n"
@@ -2855,18 +3327,14 @@ def _enforce_example_io(
         following_heading = re.search(r"(?m)^#{1,6}\s+", explanation)
         if following_heading:
             explanation = explanation[:following_heading.start()].strip()
-    if not explanation:
-        explanation = (
-            "The retrieved course material does not provide additional "
-            "explanation for this example."
-        )
-
-    example_section = (
-        "\n\n## Course-Supported Example\n\n"
-        f"### Input\n\n{input_content}\n\n"
-        f"### Output\n\n{output_content}\n\n"
-        f"### Explanation of the Example\n\n{explanation}\n"
-    )
+    sections = ["## Course-Supported Example"]
+    if input_text:
+        sections.append(f"### Input\n\n{input_content}")
+    if output_text:
+        sections.append(f"### Output\n\n{output_content}")
+    if explanation:
+        sections.append(f"### Explanation of the Example\n\n{explanation}")
+    example_section = "\n\n" + "\n\n".join(sections) + "\n"
     return (
         answer[:section.start()]
         + example_section
@@ -3117,6 +3585,8 @@ class AITutor:
             AnswerPlanner()
         )
 
+        self.answer_requirement_engine = AnswerRequirementEngine()
+
         self.adaptive_learning_agent = (
             AdaptiveLearningAgent()
         )
@@ -3285,6 +3755,7 @@ class AITutor:
         # Original question
         # ----------------------------------------------------
 
+        original_question = question
         question = _clean_space(
             question
         )
@@ -3305,15 +3776,111 @@ class AITutor:
             history
         )
 
+        decomposition = decompose_questions(original_question, history)
+        if decomposition["is_multi_question"]:
+            question_results = []
+            for item in decomposition["questions"]:
+                try:
+                    item_history = history
+                    if item.get("context_question"):
+                        # A follow-up inside this message belongs to the
+                        # immediately preceding item, not an older chat turn.
+                        item_history = f"Student: {item['context_question']}"
+                    result = self.ask(
+                        question=item["text"],
+                        course_id=course_id,
+                        material_id=material_id,
+                        history=item_history,
+                    )
+                except Exception:
+                    logger.exception("multi_question_processing_failed order=%d", item["order"])
+                    result = self._empty_response(
+                        "I could not generate a reliable answer from the uploaded course material."
+                    )
+                question_results.append({
+                    "question": item["text"],
+                    "order": item["order"],
+                    "result": result,
+                })
+
+            combined_answer = "\n\n".join(
+                f"### {item['order']}. {item['question']}\n\n{item['result'].get('answer', '')}"
+                for item in question_results
+            )
+            sources = []
+            seen_sources = set()
+            for item in question_results:
+                for source in item["result"].get("sources", []):
+                    key = (source.get("filename"), source.get("page"), source.get("material_id"))
+                    if key not in seen_sources:
+                        seen_sources.add(key)
+                        sources.append(source)
+            return {
+                "answer": combined_answer,
+                "questions": question_results,
+                "sources": sources,
+                "search_query": "",
+                "answer_type": "multi_question",
+                "validation": {
+                    "sufficient": any(
+                        item["result"].get("validation", {}).get("sufficient", False)
+                        for item in question_results
+                    ),
+                    "partial": any(
+                        not item["result"].get("validation", {}).get("sufficient", False)
+                        for item in question_results
+                    ),
+                },
+                "answer_grounding": {
+                    "grounded": any(
+                        item["result"].get("answer_grounding", {}).get("grounded", False)
+                        for item in question_results
+                    ),
+                    "partial": any(
+                        not item["result"].get("answer_grounding", {}).get("grounded", False)
+                        for item in question_results
+                    ),
+                },
+                "attempts": sum(item["result"].get("attempts", 0) for item in question_results),
+                "course_id": course_id,
+                "context_aware": any(item["result"].get("context_aware", False) for item in question_results),
+            }
+
 
         # ----------------------------------------------------
         # Query understanding
         # ----------------------------------------------------
 
+        phase_started = time.perf_counter()
+        logger.info('phase=query_understanding_started')
         query_info = (
             self.query_agent.run(
                 question
             )
+        )
+        logger.info(
+            'phase=query_understanding_completed elapsed_s=%.3f',
+            time.perf_counter() - phase_started,
+        )
+
+        # Observation only: keep the canonical requirements local to this
+        # request and do not use them to alter retrieval or generation.
+        requirement_engine = getattr(self, "answer_requirement_engine", None)
+        if requirement_engine is None:
+            requirement_engine = AnswerRequirementEngine()
+        answer_requirements = requirement_engine.resolve(
+            question=question,
+            history=history,
+            detected=query_info,
+        )
+        requirement_diagnostics = dict(answer_requirements)
+        requirement_diagnostics["question"] = _safe_requirement_log_text(question)
+        requirement_diagnostics["topic"] = _safe_requirement_log_text(
+            answer_requirements.get("topic", "")
+        )
+        logger.info(
+            'phase=answer_requirements_resolved %s',
+            json.dumps(requirement_diagnostics, ensure_ascii=False, sort_keys=True),
         )
 
 
@@ -3375,10 +3942,17 @@ class AITutor:
             )
 
 
+            phase_started = time.perf_counter()
+            logger.info('phase=course_detection_rag_started')
             detected_course = (
                 self.course_agent.run(
                     course_detection_query
                 )
+            )
+            logger.info(
+                'phase=course_detection_rag_completed found=%s elapsed_s=%.3f',
+                bool(detected_course),
+                time.perf_counter() - phase_started,
             )
 
 
@@ -3395,6 +3969,8 @@ class AITutor:
         # FIRST RETRIEVAL
         # ----------------------------------------------------
 
+        phase_started = time.perf_counter()
+        logger.info('phase=retrieval_started attempt=1')
         results = (
             self.retrieval_agent.run(
                 query=search_query,
@@ -3402,6 +3978,11 @@ class AITutor:
                 material_id=material_id,
                 top_k=initial_k,
             )
+        )
+        logger.info(
+            'phase=retrieval_completed attempt=1 result_count=%d elapsed_s=%.3f',
+            len(results),
+            time.perf_counter() - phase_started,
         )
 
 
@@ -3505,6 +4086,8 @@ class AITutor:
                 )
 
 
+            phase_started = time.perf_counter()
+            logger.info('phase=retrieval_started attempt=2')
             retry_results = (
                 self.retrieval_agent.run(
                     query=improved_query,
@@ -3512,6 +4095,11 @@ class AITutor:
                     material_id=material_id,
                     top_k=retry_k,
                 )
+            )
+            logger.info(
+                'phase=retrieval_completed attempt=2 result_count=%d elapsed_s=%.3f',
+                len(retry_results),
+                time.perf_counter() - phase_started,
             )
 
 
@@ -3661,6 +4249,8 @@ class AITutor:
 
                 "context_aware": context_aware,
 
+                "answer_requirements": answer_requirements,
+
             }
 
 
@@ -3675,10 +4265,16 @@ class AITutor:
         # the student's question.
         # ----------------------------------------------------
 
+        phase_started = time.perf_counter()
         answer_plan = self.answer_planner.run(
             question=question,
             answer_type=answer_type,
             results=results,
+            requirements_context=answer_requirements,
+        )
+        logger.info(
+            'phase=answer_planning_completed elapsed_s=%.3f',
+            time.perf_counter() - phase_started,
         )
 
         adaptive_profile = self.adaptive_learning_agent.run(
@@ -3699,6 +4295,8 @@ class AITutor:
             else adaptive_instruction
         )
 
+        phase_started = time.perf_counter()
+        logger.info('phase=answer_generation_started')
         answer = (
             self.answer_agent.run(
                 question=question,
@@ -3708,18 +4306,29 @@ class AITutor:
                 answer_plan=answer_plan,
             )
         )
+        logger.info(
+            'phase=answer_generation_completed elapsed_s=%.3f',
+            time.perf_counter() - phase_started,
+        )
 
 
         # ----------------------------------------------------
         # CLAIM-LEVEL GROUNDING CHECK
         # ----------------------------------------------------
 
+        phase_started = time.perf_counter()
         grounding = (
             self.answer_grounding_agent.run(
                 answer=answer,
                 results=results,
                 question=question,
             )
+        )
+        logger.info(
+            'phase=grounding_validation_completed grounded=%s coverage=%.3f elapsed_s=%.3f',
+            bool(grounding.get("grounded")),
+            float(grounding.get("coverage", 0.0)),
+            time.perf_counter() - phase_started,
         )
 
         # ----------------------------------------------------
@@ -3732,6 +4341,8 @@ class AITutor:
         # ----------------------------------------------------
 
         if grounding.get("needs_revision"):
+            revision_started = time.perf_counter()
+            logger.info('phase=grounding_revision_started')
             revision_instruction = (
                 "\n\nGROUNDING REVISION REQUIRED. "
                 "Review your previous answer against the retrieved course evidence. "
@@ -3746,18 +4357,24 @@ class AITutor:
 
             try:
                 revision_results = results[:6]
+                revision_generator_kwargs = {"history": revision_history}
+                if (
+                    isinstance(answer_plan, dict)
+                    and isinstance(answer_plan.get("requirements_context"), dict)
+                ):
+                    revision_generator_kwargs["requirements_context"] = answer_plan
 
                 if answer_type == "short":
                     revised_answer = generate_short_answer(
                         question,
                         revision_results,
-                        history=revision_history,
+                        **revision_generator_kwargs,
                     )
                 else:
                     revised_answer = generate_long_answer(
                         question,
                         revision_results,
-                        history=revision_history,
+                        **revision_generator_kwargs,
                     )
 
                 revised_answer = str(
@@ -3793,6 +4410,12 @@ class AITutor:
 
             except Exception:
                 grounding["revision_applied"] = False
+
+            logger.info(
+                'phase=grounding_revision_completed applied=%s elapsed_s=%.3f',
+                bool(grounding.get("revision_applied", False)),
+                time.perf_counter() - revision_started,
+            )
 
         # ----------------------------------------------------
         # GROUNDED DIAGRAM
@@ -3842,6 +4465,8 @@ class AITutor:
             "answer_type": answer_type,
 
             "answer_plan": answer_plan,
+
+            "answer_requirements": answer_requirements,
 
             "adaptive_learning": adaptive_profile,
 
