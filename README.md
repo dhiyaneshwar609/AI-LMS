@@ -252,3 +252,11 @@ LeeLearn is an evolving academic AI project. Features and improvements are conti
 ## 📜 License
 
 Choose an appropriate open-source license before distributing this project. Ensure that all included educational materials are authorized for redistribution.
+
+## 📸 LeeLearn UI Previews
+
+### AI Tutor Interface
+![LeeLearn AI Tutor](screenshots/ai-tutor.png)
+
+### RAG-Based AI Tutor
+![LeeLearn RAG AI Tutor](screenshots/rag-ai-tutor.png)
